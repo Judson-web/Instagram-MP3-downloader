@@ -112,7 +112,7 @@
           </div>
           <div class="result-file">
             <div class="file-art" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-            <div class="file-meta"><strong>reeltone.mp3</strong><span id="result-quality">MP3 · 192 kbps</span></div>
+            <div class="file-meta"><strong id="result-filename">reeltone.mp3</strong><span id="result-quality">MP3 · 192 kbps</span><span id="result-author" class="result-author">MP3 audio · ready to download</span></div>
             <span class="file-extension">MP3</span>
           </div>
           <button class="convert-button download-button" id="download-button" type="button">
@@ -124,7 +124,7 @@
 
         <section class="error-panel" id="error-panel" hidden role="alert">
           <div class="error-icon" aria-hidden="true">!</div>
-          <div class="error-copy"><strong id="error-title">We couldn't convert that link.</strong><p id="error-message">Double-check the URL and try again.</p></div>
+          <div class="error-copy"><span class="error-category" id="error-category">CONVERSION ISSUE</span><strong id="error-title">We couldn't convert that link.</strong><p id="error-message">Double-check the URL and try again.</p></div>
           <button class="text-button" id="retry-button" type="button">Try again</button>
         </section>
       </section>
