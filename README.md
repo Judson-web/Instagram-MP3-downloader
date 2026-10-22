@@ -1,65 +1,65 @@
 # ReelTone
 
-A URL-first Instagram Reel to MP3 converter. Paste a public Instagram video URL, choose a bitrate, and download the extracted audio.
+ReelTone converts public Instagram Reel and video-post URLs into downloadable MP3 audio. The primary workflow is **paste a URL and receive an MP3**. There is no local video-upload flow.
 
 ## Stack
 
-- Node.js + Express API
-- yt-dlp for retrieving supported public video URLs
-- FFmpeg for MP3 extraction and encoding
-- Docker for a consistent deployment environment
-- Render for hosting, with automatic deployment from `main`
+- Express on Vercel Fluid Compute
+- yt-dlp via `youtube-dl-exec`
+- FFmpeg via `ffmpeg-static`
+- Neon Postgres for persistent per-IP rate limiting, storing a keyed hash rather than raw IP addresses
 
 ## Features
 
-- URL-first workflow; no local video upload flow
-- 128, 192, and 320 kbps MP3 output choices
-- Live job progress, cancel support, and direct MP3 download
-- Public Instagram Reel and video-post URLs
-- Temporary job files with automatic cleanup
-- Per-IP request limits and a single active conversion by default
-- URL and hostname validation, request-size limits, Helmet security headers, and no credential/cookie collection
-- Responsive, accessible UI with reduced-motion support
+- Paste a public Instagram Reel URL
+- Select 128, 192, or 320 kbps MP3 output
+- Stream the completed MP3 directly from the conversion function to the browser
+- Animated progress, cancellation, result state, and local browser download
+- Host and path validation, request-size limits, safe headers, bounded duration, extraction timeout, and request throttling
+- Automatic removal of temporary media from the function's scratch directory
 
-## Run locally
+## Local development
 
-Requirements: Node.js 20+, Python 3.10+, and FFmpeg installed on the machine.
+Requirements: Node.js 20+ and Python 3.9+ (for the yt-dlp executable installed by `youtube-dl-exec`).
 
-1. Install Node dependencies: `npm install`
-2. Install yt-dlp: `python3 -m pip install yt-dlp`
-3. Start the service: `npm start`
-4. Open `http://localhost:3000`
+1. Install dependencies with `npm install`.
+2. Set `DATABASE_URL` to your dedicated Neon `reeltone` database connection string.
+3. Set `RATE_LIMIT_SECRET` to a long random value.
+4. Set `YOUTUBE_DL_FILENAME=yt-dlp_linux` and `YOUTUBE_DL_SKIP_PYTHON_CHECK=true` when building for the Linux standalone binary used on Vercel.
+5. Run `npm start` and open `http://localhost:3000`.
+6. Run `npm run check` for JavaScript syntax checks.
 
-To check JavaScript syntax, run `npm run check`.
+The app has an in-memory rate-limit fallback for local development if `DATABASE_URL` is omitted. Production should use Neon.
 
-## Docker
+## Deploy on Vercel
 
-```sh
-docker build -t reeltone .
-docker run --rm -p 10000:10000 -e PORT=10000 reeltone
-```
+The repository is configured to deploy as a Vercel Express application. Connect this repository to a **new** Vercel project named `instagram-mp3-downloader`. Do not reuse the Auto Redeemer project.
 
-## Deploy to Render
+Set these environment variables for Production, Preview, and Development where appropriate:
 
-The repository contains a `Dockerfile` and `render.yaml` Blueprint. Connect the repository to Render and create the service from the Blueprint. Render can then build the image and automatically redeploy when `main` changes. The service health endpoint is `/api/health`.
+- `DATABASE_URL`: connection string for the dedicated Neon database `reeltone`
+- `RATE_LIMIT_SECRET`: a long, randomly generated secret used to hash visitor IPs
+- `YOUTUBE_DL_FILENAME=yt-dlp_linux`
+- `YOUTUBE_DL_SKIP_PYTHON_CHECK=true`
 
-The free service plan may spin down while idle, so the first request after a quiet period can take longer. Increase the Render plan and resource limits if the site needs sustained usage or more concurrent jobs.
+`vercel.json` includes the media binaries in the server function bundle and sets the 300-second maximum function duration. Vercel serves the files under `public/` from its CDN; Express handles the API.
+
+## Neon
+
+Use the standalone Neon project named `instagram-mp3-converter` in Singapore. It is separate from the Kingshot databases. The `conversion_usage` table supports a per-IP hourly limit of eight conversions. Only an HMAC hash of the IP address is stored, with old buckets periodically deleted.
 
 ## API
 
-- `GET /api/health` — service health
-- `POST /api/convert` — body: `{"url":"https://www.instagram.com/reel/SHORTCODE/","quality":"192"}`; returns a `jobId`
-- `GET /api/jobs/:id` — poll job status and conversion progress
-- `GET /api/jobs/:id/download` — download the completed MP3
-- `DELETE /api/jobs/:id` — cancel a running conversion
+- `GET /api/health` returns service health.
+- `POST /api/convert` accepts JSON such as `{"url":"https://www.instagram.com/reel/SHORTCODE/","quality":"192"}` and responds with `audio/mpeg` when conversion succeeds, or a JSON error when it fails.
 
-Supported quality values are `128`, `192`, and `320`. By default, videos longer than 10 minutes are rejected, each IP is limited to 8 conversion requests per hour, and the service processes one conversion at a time. Jobs and temporary MP3 files expire after 15 minutes.
+Valid quality values are `128`, `192`, and `320`. The default duration limit is 10 minutes and each IP is limited to eight attempts per hour. Extraction is stopped after four minutes to leave time for the result to stream.
 
 ## Notes
 
-Instagram availability varies; some public posts may still be unavailable to third-party tools. ReelTone does not request Instagram passwords, read browser sessions, or attempt to access private/login-gated media. A conversion may fail when the source cannot be retrieved publicly.
+Instagram availability changes; some public URLs may still be unavailable to third-party tools. The app does not request Instagram passwords or attempt to access private or login-gated videos. Use audio you have permission to download or reuse.
 
-Only download or reuse audio you have permission to use. This project is independent and is not affiliated with Instagram or Meta.
+ReelTone is independent and is not affiliated with Instagram or Meta.
 
 ## License
 
