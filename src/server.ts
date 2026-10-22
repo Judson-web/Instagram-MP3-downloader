@@ -148,8 +148,8 @@ app.get("/", (req: Request, res: Response, next: NextFunction) => {
   fs.readFile(path.join(__dirname, "public", "index.html"), "utf8", (error, markup) => {
     if (error) return next(error);
     const nonce = String(res.locals.cspNonce || "");
-    const html = markup.replace(/<script type="application\\/ld\\+json">/g, '<script type="application/ld+json" nonce="' + nonce + '">');
-    res.set("Cache-Control", "no-cache");
+    const html = markup.replaceAll('<script type="application/ld+json">', '<script type="application/ld+json" nonce="' + nonce + '">');
+    res.set("Cache-Control", "no-store");
     res.type("html").send(html);
   });
 });
