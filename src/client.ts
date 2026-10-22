@@ -7,6 +7,7 @@ type ApiError = {
   message?: string;
   retryable?: boolean;
   category?: string;
+  retryAfterSeconds?: number;
 };
 
 const byId = <T extends HTMLElement>(id: string): T => {
@@ -226,6 +227,8 @@ const byId = <T extends HTMLElement>(id: string): T => {
       NO_PUBLIC_MEDIA: "NO PUBLIC MEDIA",
       REEL_UNAVAILABLE: "REEL UNAVAILABLE",
       INSTAGRAM_RATE_LIMITED: "SOURCE RATE LIMIT",
+      RESOLVER_RATE_LIMITED: "LOOKUP RATE LIMIT",
+      PROVIDER_RATE_LIMITED: "PROVIDER RATE LIMIT",
       RATE_LIMITED: "HOURLY LIMIT",
       VIDEO_TOO_LONG: "DURATION LIMIT",
       VIDEO_TOO_LARGE: "FILE SIZE LIMIT",
@@ -241,6 +244,8 @@ const byId = <T extends HTMLElement>(id: string): T => {
       NO_PUBLIC_MEDIA: "unavailable",
       REEL_UNAVAILABLE: "unavailable",
       INSTAGRAM_RATE_LIMITED: "rate-limit",
+      RESOLVER_RATE_LIMITED: "rate-limit",
+      PROVIDER_RATE_LIMITED: "rate-limit",
       RATE_LIMITED: "rate-limit",
       VIDEO_TOO_LONG: "limit",
       VIDEO_TOO_LARGE: "limit",
@@ -255,11 +260,50 @@ const byId = <T extends HTMLElement>(id: string): T => {
     setBusy(false);
   }
 
+  let retryCountdownInterval: number | null = null;
+  let retryButtonDefaultLabel = retryButton.textContent?.trim() || "Try again";
+
+  function clearRetryCountdown() {
+    if (retryCountdownInterval !== null) window.clearInterval(retryCountdownInterval);
+    retryCountdownInterval = null;
+    retryButton.disabled = false;
+    retryButton.textContent = retryButtonDefaultLabel;
+  }
+
+  function startRetryCountdown(seconds: number) {
+    clearRetryCountdown();
+    const endAt = Date.now() + Math.max(1, seconds) * 1000;
+    const update = () => {
+      const remaining = Math.max(0, Math.ceil((endAt - Date.now()) / 1000));
+      if (remaining <= 0) {
+        clearRetryCountdown();
+        return;
+      }
+      const minutes = Math.floor(remaining / 60);
+      const secs = remaining % 60;
+      retryButton.disabled = true;
+      retryButton.textContent = minutes > 0
+        ? "Try again in " + minutes + "m " + String(secs).padStart(2, "0") + "s"
+        : "Try again in " + secs + "s";
+    };
+    update();
+    retryCountdownInterval = window.setInterval(update, 1000);
+  }
+
   function showApiError(payload: ApiError) {
     const code = payload.code || "CONVERSION_FAILED";
+    clearRetryCountdown();
+    const cooldownCodes = ["INSTAGRAM_RATE_LIMITED", "RESOLVER_RATE_LIMITED", "PROVIDER_RATE_LIMITED"];
+    let message = payload.error || payload.message || "Check that the Reel is publicly accessible, then try again.";
+    if (cooldownCodes.includes(code) && Number(payload.retryAfterSeconds) > 0) {
+      const seconds = Math.max(1, Math.ceil(Number(payload.retryAfterSeconds)));
+      const minutes = Math.ceil(seconds / 60);
+      message += " Retry is paused for about " + (minutes <= 1 ? "one minute." : minutes + " minutes.") + " The retry button will unlock when the cooldown ends.";
+      startRetryCountdown(seconds);
+    }
     showError(
       payload.title || "We couldn't convert that Reel",
-      payload.error || payload.message || "Check that the Reel is publicly accessible, then try again.",
+      message,
       code,
       payload.category
     );
@@ -541,9 +585,11 @@ const byId = <T extends HTMLElement>(id: string): T => {
 
   newConversionButton.addEventListener("click", resetForAnother);
   retryButton.addEventListener("click", () => {
+    if (retryButton.disabled) return;
     show(errorPanel, false);
     clearInputError();
-    urlInput.focus();
+    if (urlInput.value.trim()) form.requestSubmit();
+    else urlInput.focus();
   });
 
   window.addEventListener("pagehide", revokeAudioUrl);

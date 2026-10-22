@@ -6,6 +6,7 @@ import fs = require("node:fs");
 import os = require("node:os");
 import path = require("node:path");
 import crypto = require("node:crypto");
+import net = require("node:net");
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
@@ -34,7 +35,7 @@ let sqlClient;
 
 type ApiErrorCode =
   | "INVALID_URL" | "INVALID_QUALITY" | "RATE_LIMITED" | "DATABASE_UNAVAILABLE"
-  | "ENGINE_UNAVAILABLE" | "PRIVATE_REEL" | "LOGIN_REQUIRED" | "INSTAGRAM_RATE_LIMITED"
+  | "ENGINE_UNAVAILABLE" | "PRIVATE_REEL" | "LOGIN_REQUIRED" | "INSTAGRAM_RATE_LIMITED" | "RESOLVER_RATE_LIMITED" | "PROVIDER_RATE_LIMITED"
   | "REEL_UNAVAILABLE" | "NO_PUBLIC_MEDIA" | "VIDEO_TOO_LONG" | "VIDEO_TOO_LARGE"
   | "CONVERSION_TIMEOUT" | "RESOLVER_UNAVAILABLE" | "CONVERSION_FAILED";
 
@@ -44,6 +45,7 @@ interface ApiErrorPayload {
   error: string;
   retryable: boolean;
   category: "input" | "privacy" | "availability" | "rate-limit" | "service" | "conversion";
+  retryAfterSeconds?: number;
 }
 interface ResolverMediaItem { type?: string; url?: string; duration?: number | string; }
 interface PublicResolverPayload {
@@ -56,6 +58,7 @@ interface ConversionAttempt {
   reason: string;
   detail?: string;
   diagnostic?: string;
+  retryAfterSeconds?: number;
   title?: string;
   author?: string;
 }
@@ -65,6 +68,9 @@ type MediaAssetAttempt =
 
 function sendApiError(res: Response, status: number, payload: ApiErrorPayload): Response {
   res.set("Cache-Control", "no-store");
+  if (payload.retryAfterSeconds !== undefined) {
+    res.set("Retry-After", String(Math.max(1, Math.ceil(payload.retryAfterSeconds))));
+  }
   return res.status(status).json(payload);
 }
 
@@ -79,8 +85,14 @@ function classifyConversionFailure(evidence: string, timedOut = false): { status
   if (/(?:login[-_ ]required|redirected to the login page|sign in to (?:view|continue)|log in to (?:view|continue)|authentication required|requires? (?:you to )?(?:log in|sign in))/.test(message)) {
     return { status: 422, payload: { code: "LOGIN_REQUIRED", title: "Instagram requires a signed-in session", error: "This link is gated behind Instagram login or an age/visibility check. ReelTone does not use account cookies or ask for your password, so this Reel cannot be processed here.", retryable: false, category: "privacy" } };
   }
-  if (/(?:exceeded the rate.?limit|too many requests|rate.?limit|http error 429|status.?429|instagram-rate-limited|resolver-rate-limited)/.test(message)) {
-    return { status: 503, payload: { code: "INSTAGRAM_RATE_LIMITED", title: "Instagram is temporarily limiting requests", error: "The source or resolver is throttling anonymous requests. Wait a few minutes before trying again; repeated attempts may extend the cooldown.", retryable: true, category: "rate-limit" } };
+  if (/resolver-rate-limited|resolver-cooldown/.test(message)) {
+    return { status: 503, payload: { code: "RESOLVER_RATE_LIMITED", title: "The link lookup service is cooling down", error: "The lookup provider is temporarily limiting requests. ReelTone will pause calls to it instead of repeatedly retrying.", retryable: true, category: "rate-limit", retryAfterSeconds: DEFAULT_SOURCE_COOLDOWN_SECONDS } };
+  }
+  if (/provider-rate-limited|provider-cooldown/.test(message)) {
+    return { status: 503, payload: { code: "PROVIDER_RATE_LIMITED", title: "The media provider is cooling down", error: "The media provider is temporarily limiting requests. ReelTone will pause calls to it instead of repeatedly retrying.", retryable: true, category: "rate-limit", retryAfterSeconds: DEFAULT_SOURCE_COOLDOWN_SECONDS } };
+  }
+  if (/(?:exceeded the rate.?limit|too many requests|rate.?limit|http error 429|status.?429|instagram-rate-limited)/.test(message)) {
+    return { status: 503, payload: { code: "INSTAGRAM_RATE_LIMITED", title: "Instagram is temporarily limiting requests", error: "ReelTone has paused further Instagram requests to respect the source limit.", retryable: true, category: "rate-limit", retryAfterSeconds: DEFAULT_SOURCE_COOLDOWN_SECONDS } };
   }
   if (/duration-limit|video too long|longer than the 20-minute limit|duration.{0,40}(?:exceeds?|greater than|longer than)/.test(message)) {
     return { status: 413, payload: { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" } };
@@ -157,8 +169,61 @@ app.get("/", (req: Request, res: Response, next: NextFunction) => {
 // Serve public assets in both Vercel and local deployments.
 app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true }));
 
-function clientKey(req) {
+function clientKey(req: Request): string {
+  // Keep the full address only as a short-lived value during this request.
   return String(req.ip || req.socket.remoteAddress || "unknown").slice(0, 100);
+}
+
+function maskClientIp(ipAddress: string): string {
+  let value = String(ipAddress || "").trim().replace(/^\[|\]$/g, "").split("%")[0].toLowerCase();
+  if (!value || value.length > 100) return "unknown";
+
+  const ipv4Subnet = (raw: string): string | null => {
+    if (net.isIP(raw) !== 4) return null;
+    const octets = raw.split(".").map(Number);
+    if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return null;
+    // IPv4 is truncated to /24 before the keyed hash is calculated.
+    return octets.slice(0, 3).join(".") + ".0/24";
+  };
+
+  // Normalize IPv4-mapped IPv6 addresses to the equivalent IPv4 /24.
+  if (value.startsWith("::ffff:")) {
+    const mappedTail = value.slice(7);
+    const dotted = ipv4Subnet(mappedTail);
+    if (dotted) return dotted;
+    const mappedHex = mappedTail.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (mappedHex) {
+      const first = parseInt(mappedHex[1], 16);
+      const second = parseInt(mappedHex[2], 16);
+      const octets = [first >> 8, first & 255, second >> 8, second & 255];
+      return octets.slice(0, 3).join(".") + ".0/24";
+    }
+  }
+
+  const v4 = ipv4Subnet(value);
+  if (v4) return v4;
+  if (net.isIP(value) !== 6) return "unknown";
+
+  // Expand an optional embedded IPv4 tail into two IPv6 groups.
+  const dottedPart = value.split(":").find((part) => part.includes("."));
+  if (dottedPart) {
+    const dotted = dottedPart;
+    const octets = dotted.split(".").map(Number);
+    if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return "unknown";
+    const replacement = [((octets[0] << 8) | octets[1]).toString(16), ((octets[2] << 8) | octets[3]).toString(16)].join(":");
+    value = value.replace(dotted, replacement);
+  }
+
+  const halves = value.split("::");
+  if (halves.length > 2) return "unknown";
+  const left = halves[0] ? halves[0].split(":").filter(Boolean) : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":").filter(Boolean) : [];
+  const zeroCount = 8 - left.length - right.length;
+  if (zeroCount < 0 || (halves.length === 1 && zeroCount !== 0)) return "unknown";
+  const groups = [...left, ...Array(zeroCount).fill("0"), ...right];
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return "unknown";
+  // IPv6 is truncated to /64. Only this network prefix is fed into HMAC-SHA-256.
+  return groups.slice(0, 4).map((group) => parseInt(group, 16).toString(16)).join(":") + "::/64";
 }
 
 function validateInstagramUrl(raw) {
@@ -201,33 +266,115 @@ function getSql() {
   return sqlClient;
 }
 
-function makeIpHash(ip) {
+function makeIpHash(ip: string): string {
   const configuredSecret = process.env.RATE_LIMIT_SECRET;
   if (process.env.NODE_ENV === "production" &&
       (!configuredSecret || Buffer.byteLength(configuredSecret, "utf8") < 32)) {
     throw new Error("RATE_LIMIT_SECRET must be configured with at least 32 bytes in production");
   }
   const secret = configuredSecret || "reeltone-local-rate-limit";
-  // HMAC-SHA-256 is a keyed one-way pseudonym for rate limiting, not a password hash.
-  return crypto.createHmac("sha256", secret).update(ip, "utf8").digest("hex");
+  // Hash only the truncated network prefix. No raw IP or masked prefix is persisted.
+  return crypto.createHmac("sha256", secret).update(maskClientIp(ip), "utf8").digest("hex");
+}
+
+
+const DEFAULT_SOURCE_COOLDOWN_SECONDS = 300;
+const MAX_SOURCE_COOLDOWN_SECONDS = 3600;
+type SourceCooldownKey = "instagram" | "resolver" | "easydown";
+const localSourceCooldowns = new Map<SourceCooldownKey, { until: number; strikeCount: number }>();
+
+function parseRetryAfterSeconds(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric) && trimmed !== "") {
+    return Math.min(MAX_SOURCE_COOLDOWN_SECONDS, Math.max(1, Math.ceil(numeric)));
+  }
+  const dateValue = Date.parse(trimmed);
+  if (!Number.isFinite(dateValue)) return undefined;
+  return Math.min(MAX_SOURCE_COOLDOWN_SECONDS, Math.max(1, Math.ceil((dateValue - Date.now()) / 1000)));
+}
+
+async function getSourceCooldownSeconds(source: SourceCooldownKey): Promise<number> {
+  const sql = getSql();
+  if (!sql) {
+    const current = localSourceCooldowns.get(source);
+    return current ? Math.max(0, Math.ceil((current.until - Date.now()) / 1000)) : 0;
+  }
+  const rows = await sql`
+    SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM (cooldown_until - now()))))::int AS remaining_seconds
+    FROM reeltone_source_cooldowns
+    WHERE cooldown_key = ${source} AND cooldown_until > now()
+    LIMIT 1
+  `;
+  return Math.min(MAX_SOURCE_COOLDOWN_SECONDS, Math.max(0, Number(rows[0]?.remaining_seconds || 0)));
+}
+
+async function registerSourceCooldown(source: SourceCooldownKey, retryAfterSeconds?: number): Promise<number> {
+  const requested = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, Math.max(1, Math.ceil(retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS)));
+  const sql = getSql();
+  if (!sql) {
+    const previous = localSourceCooldowns.get(source);
+    const isActive = !!previous && previous.until > Date.now();
+    const strikeCount = previous ? (isActive ? previous.strikeCount : Math.min(8, previous.strikeCount + 1)) : 1;
+    const backoff = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, DEFAULT_SOURCE_COOLDOWN_SECONDS * (2 ** (strikeCount - 1)));
+    const duration = Math.max(requested, backoff);
+    localSourceCooldowns.set(source, { until: Math.max(previous?.until || 0, Date.now() + duration * 1000), strikeCount });
+    return Math.max(1, Math.ceil((localSourceCooldowns.get(source)!.until - Date.now()) / 1000));
+  }
+
+  const existing = await sql`
+    SELECT strike_count, (cooldown_until > now()) AS active
+    FROM reeltone_source_cooldowns
+    WHERE cooldown_key = ${source}
+    LIMIT 1
+  `;
+  const oldStrikeCount = Number(existing[0]?.strike_count || 0);
+  const stillActive = existing[0]?.active === true;
+  const strikeCount = oldStrikeCount === 0 ? 1 : (stillActive ? oldStrikeCount : Math.min(8, oldStrikeCount + 1));
+  const backoff = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, DEFAULT_SOURCE_COOLDOWN_SECONDS * (2 ** (strikeCount - 1)));
+  const duration = Math.max(requested, backoff);
+  await sql`
+    INSERT INTO reeltone_source_cooldowns (cooldown_key, cooldown_until, strike_count, updated_at)
+    VALUES (${source}, now() + (${duration} * interval '1 second'), ${strikeCount}, now())
+    ON CONFLICT (cooldown_key) DO UPDATE SET
+      cooldown_until = GREATEST(reeltone_source_cooldowns.cooldown_until, EXCLUDED.cooldown_until),
+      strike_count = GREATEST(reeltone_source_cooldowns.strike_count, EXCLUDED.strike_count),
+      updated_at = now()
+  `;
+  return await getSourceCooldownSeconds(source) || duration;
+}
+
+function sourceCooldownError(res: Response, source: SourceCooldownKey, remainingSeconds: number): Response {
+  const seconds = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, Math.max(1, Math.ceil(remainingSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS)));
+  const isInstagram = source === "instagram";
+  const isResolver = source === "resolver";
+  const code: ApiErrorCode = isInstagram ? "INSTAGRAM_RATE_LIMITED" : (isResolver ? "RESOLVER_RATE_LIMITED" : "PROVIDER_RATE_LIMITED");
+  const title = isInstagram ? "Instagram is temporarily limiting requests" :
+    (isResolver ? "The link lookup service is cooling down" : "The media provider is cooling down");
+  const error = isInstagram
+    ? "ReelTone has paused further Instagram requests to respect the source limit. Wait for the cooldown instead of retrying repeatedly."
+    : "ReelTone has paused requests to this lookup provider and will avoid calling it again until its cooldown expires.";
+  return sendApiError(res, 503, {
+    code, title, error, retryable: true, category: "rate-limit", retryAfterSeconds: seconds
+  });
 }
 
 async function checkRateLimit(ip) {
   const sql = getSql();
+  const ipHash = makeIpHash(ip);
   if (!sql) {
-    // Local development fallback only. Production is configured with Neon.
+    // Local fallback stores only keyed pseudonyms, never IP addresses or subnets.
     const now = Date.now();
-    const recent = (requestsByIp.get(ip) || []).filter((time) => now - time < 60 * 60 * 1000);
+    const recent = (requestsByIp.get(ipHash) || []).filter((time) => now - time < 60 * 60 * 1000);
     if (recent.length >= MAX_REQUESTS_PER_HOUR) {
-      requestsByIp.set(ip, recent);
+      requestsByIp.set(ipHash, recent);
       return false;
     }
     recent.push(now);
-    requestsByIp.set(ip, recent);
+    requestsByIp.set(ipHash, recent);
     return true;
   }
-
-  const ipHash = makeIpHash(ip);
   const rows = await sql`
     INSERT INTO conversion_usage (ip_hash, window_start, request_count)
     VALUES (${ipHash}, date_trunc('hour', now()), 1)
@@ -398,6 +545,10 @@ async function fetchInstagramMediaAsset(rawUrl, parentSignal): Promise<MediaAsse
       continue;
     }
 
+    if (response.status === 429) {
+      await response.body?.cancel().catch(() => {});
+      return { ok: false, reason: "instagram-rate-limited", retryAfterSeconds: parseRetryAfterSeconds(response.headers.get("retry-after")) } as any;
+    }
     if (!response.ok || !response.body) {
       await response.body?.cancel().catch(() => {});
       return { ok: false, reason: "media-not-public" };
@@ -499,8 +650,10 @@ async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality,
       },
       signal: AbortSignal.any([parentSignal, AbortSignal.timeout(12000)])
     });
+    if (response.status === 429) {
+      return { ok: false, reason: "resolver-rate-limited", retryAfterSeconds: parseRetryAfterSeconds(response.headers.get("retry-after")) };
+    }
     if (!response.ok) {
-      if (response.status === 429) return { ok: false, reason: "resolver-rate-limited" };
       if (response.status === 404) return { ok: false, reason: "reel-unavailable" };
       return { ok: false, reason: "resolver-http-" + response.status };
     }
@@ -512,9 +665,11 @@ async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality,
       let reason = "no-public-media";
       if (payload.private === true || payload.is_private === true || /private|is_private/.test(lower)) reason = "private-reel";
       else if (payload.login_required === true || payload.requires_login === true || /login[-_ ]required|sign in|authentication required/.test(lower)) reason = "login-required";
-      else if (/rate.?limit|too many requests|429/.test(lower)) reason = "instagram-rate-limited";
+      else if (/rate.?limit|too many requests|429/.test(lower)) {
+        reason = /instagram|source/.test(lower) ? "instagram-rate-limited" : "resolver-rate-limited";
+      }
       else if (/not found|removed|deleted|does not exist/.test(lower)) reason = "reel-unavailable";
-      return { ok: false, reason, detail: upstreamText.slice(0, 180) };
+      return { ok: false, reason, retryAfterSeconds: parseRetryAfterSeconds(String((payload as any)?.retry_after || (payload as any)?.retryAfter || "")), detail: upstreamText.slice(0, 180) };
     }
 
     const candidates = payload.media.filter((item) =>
@@ -631,6 +786,10 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
         await pageResponse.body?.cancel().catch(() => {});
         return { ok: false, reason: "login-required", diagnostic: pageLabel + ":redirected-to-login" };
       }
+      if (pageResponse.status === 429) {
+        await pageResponse.body?.cancel().catch(() => {});
+        return { ok: false, reason: "instagram-rate-limited", retryAfterSeconds: parseRetryAfterSeconds(pageResponse.headers.get("retry-after")), diagnostic: pageLabel + ":http-429" };
+      }
       if (!pageResponse.ok || !ALLOWED_HOSTS.has(finalHost)) {
         await pageResponse.body?.cancel().catch(() => {});
         lastReason = pageResponse.status === 404 ? "reel-unavailable" : "instagram-page-unavailable";
@@ -658,6 +817,9 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
         lastReason = "instagram-page-too-large";
         pageDiagnostics.push(`${pageLabel}:html-too-large`);
         continue;
+      }
+      if (/please wait a few minutes before you try again|too many requests|rate.?limit exceeded|temporarily blocked/i.test(html)) {
+        return { ok: false, reason: "instagram-rate-limited", diagnostic: pageLabel + ":rate-limit-page" };
       }
 
       if (/<title>\\s*Page Not Found\\b/i.test(html) || /"message"\\s*:\\s*"This page is not available/i.test(html)) {
@@ -750,7 +912,15 @@ async function tryEasyDownToMp3(sourceUrl, directory, outputPath, quality, paren
     if (response.status === 401 || response.status === 403) {
       return { ok: false, reason: "provider-auth-failed" };
     }
+    if (response.status === 429 || Number(payload?.status || 0) === 429) {
+      return { ok: false, reason: "provider-rate-limited", retryAfterSeconds: parseRetryAfterSeconds(response.headers.get("retry-after")) };
+    }
     if (!response.ok || !payload || Number(payload.status || response.status) >= 400) {
+      const bodyError = String(payload?.error || payload?.message || payload?.code || "").toLowerCase();
+      if (/rate.?limit|too many requests|http error 429/.test(bodyError)) {
+        const sourceLimited = /instagram|source/.test(bodyError);
+        return { ok: false, reason: sourceLimited ? "instagram-rate-limited" : "provider-rate-limited", retryAfterSeconds: parseRetryAfterSeconds(response.headers.get("retry-after")) };
+      }
       return { ok: false, reason: "provider-no-media" };
     }
 
@@ -852,6 +1022,8 @@ app.post("/api/convert", async (req, res) => {
   }
 
   try {
+    const sourceCooldown = await getSourceCooldownSeconds("instagram");
+    if (sourceCooldown > 0) return sourceCooldownError(res, "instagram", sourceCooldown);
     if (!(await checkRateLimit(clientKey(req)))) {
       return sendApiError(res, 429, { code: "RATE_LIMITED", title: "Hourly conversion limit reached", error: "This site allows eight conversion attempts per hour per visitor. Please wait for the limit to reset before trying again.", retryable: true, category: "rate-limit" });
     }
@@ -931,6 +1103,14 @@ app.post("/api/convert", async (req, res) => {
       cleanup();
       return;
     }
+    if (providerFallback.reason === "instagram-rate-limited") {
+      const seconds = await registerSourceCooldown("instagram", providerFallback.retryAfterSeconds);
+      cleanup();
+      return sourceCooldownError(res, "instagram", seconds);
+    }
+    if (providerFallback.reason === "provider-rate-limited") {
+      providerFallback.retryAfterSeconds = await registerSourceCooldown("easydown", providerFallback.retryAfterSeconds);
+    }
     if (providerFallback.ok && fs.existsSync(outputPath)) {
       await streamResult();
       return;
@@ -950,18 +1130,31 @@ app.post("/api/convert", async (req, res) => {
     // Instagram can serve login/rate-limit walls to anonymous serverless IPs.
     // Resolve only the supplied public Reel URL, then download directly from an
     // allow-listed Instagram CDN host and encode the MP3 in this function.
-    publicResolver = await tryPublicResolverToMp3(
-      validated.url,
-      directory,
-      outputPath,
-      quality,
-      fallbackController.signal,
-      (process) => { fallbackChild = process; }
-    );
+    const resolverCooldown = await getSourceCooldownSeconds("resolver");
+    if (resolverCooldown > 0) {
+      publicResolver = { ok: false, reason: "resolver-cooldown", retryAfterSeconds: resolverCooldown };
+    } else {
+      publicResolver = await tryPublicResolverToMp3(
+        validated.url,
+        directory,
+        outputPath,
+        quality,
+        fallbackController.signal,
+        (process) => { fallbackChild = process; }
+      );
+    }
 
     if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
       cleanup();
       return;
+    }
+    if (publicResolver.reason === "instagram-rate-limited") {
+      const seconds = await registerSourceCooldown("instagram", publicResolver.retryAfterSeconds);
+      cleanup();
+      return sourceCooldownError(res, "instagram", seconds);
+    }
+    if (publicResolver.reason === "resolver-rate-limited") {
+      publicResolver.retryAfterSeconds = await registerSourceCooldown("resolver", publicResolver.retryAfterSeconds);
     }
     if (publicResolver.ok && fs.existsSync(outputPath)) {
       audioTitle = publicResolver.title;
@@ -995,6 +1188,11 @@ app.post("/api/convert", async (req, res) => {
       return;
     }
 
+    if (publicFallback.reason === "instagram-rate-limited") {
+      const seconds = await registerSourceCooldown("instagram", publicFallback.retryAfterSeconds);
+      cleanup();
+      return sourceCooldownError(res, "instagram", seconds);
+    }
     if (publicFallback.ok && fs.existsSync(outputPath)) {
       await streamResult();
       return;
@@ -1114,6 +1312,18 @@ app.post("/api/convert", async (req, res) => {
     publicFallback.diagnostic || "",
     diagnosticText
   ].join(" ");
+  if (/(?:http error 429|429 too many requests|instagram-rate-limited|please wait a few minutes before you try again|instagram.{0,80}rate.?limit)/i.test(diagnosticText)) {
+    const seconds = await registerSourceCooldown("instagram");
+    return sourceCooldownError(res, "instagram", seconds);
+  }
+  if (["resolver-rate-limited", "resolver-cooldown"].includes(publicResolver.reason)) {
+    const seconds = (await getSourceCooldownSeconds("resolver")) || publicResolver.retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS;
+    return sourceCooldownError(res, "resolver", seconds);
+  }
+  if (["provider-rate-limited", "provider-cooldown"].includes(providerFallback.reason)) {
+    const seconds = (await getSourceCooldownSeconds("easydown")) || providerFallback.retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS;
+    return sourceCooldownError(res, "easydown", seconds);
+  }
   const failure = classifyConversionFailure(failureEvidence, timedOut);
   return sendApiError(res, failure.status, failure.payload);
 });
