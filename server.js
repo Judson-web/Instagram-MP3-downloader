@@ -376,6 +376,84 @@ async function encodeDownloadedVideo(inputPath, outputPath, quality, signal, set
   });
 }
 
+async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess) {
+  const inputPath = path.join(directory, "resolver-source.mp4");
+  try {
+    const resolverUrl = new URL("https://weirddl.sbs/api/info");
+    resolverUrl.searchParams.set("url", sourceUrl);
+
+    const response = await fetch(resolverUrl, {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": INSTAGRAM_BROWSER_UA
+      },
+      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(12000)])
+    });
+    if (!response.ok) return { ok: false, reason: "resolver-http-" + response.status };
+
+    const payload = await response.json().catch(() => null);
+    if (!payload || payload.ok !== true || !Array.isArray(payload.media)) {
+      return { ok: false, reason: "resolver-no-media" };
+    }
+
+    const candidates = payload.media.filter((item) =>
+      item &&
+      item.type === "video" &&
+      typeof item.url === "string" &&
+      isAllowedMediaAsset(item.url)
+    );
+    const selected = candidates[0];
+    if (!selected) return { ok: false, reason: "resolver-no-video" };
+
+    const duration = Number(payload.duration || selected.duration || 0);
+    if (duration > MAX_DURATION_SECONDS) return { ok: false, reason: "duration-limit" };
+
+    const media = await fetchInstagramMediaAsset(selected.url, parentSignal);
+    if (!media.ok) return media;
+    if (media.contentLength > MAX_SOURCE_BYTES) {
+      await media.response.body?.cancel().catch(() => {});
+      return { ok: false, reason: "media-too-large" };
+    }
+
+    let totalBytes = 0;
+    const limiter = new Transform({
+      transform(chunk, _encoding, callback) {
+        totalBytes += chunk.length;
+        if (totalBytes > MAX_SOURCE_BYTES) callback(new Error("source video exceeded the size limit"));
+        else callback(null, chunk);
+      }
+    });
+
+    try {
+      await pipeline(
+        Readable.fromWeb(media.response.body),
+        limiter,
+        fs.createWriteStream(inputPath, { flags: "wx" }),
+        { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
+      );
+    } catch (error) {
+      fs.rmSync(inputPath, { force: true });
+      if (error?.name === "AbortError" || error?.name === "TimeoutError") return { ok: false, reason: "media-download-timeout" };
+      if (/size limit/.test(String(error?.message || ""))) return { ok: false, reason: "media-too-large" };
+      return { ok: false, reason: "media-download-failed" };
+    }
+
+    if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+    await encodeDownloadedVideo(inputPath, outputPath, quality, parentSignal, setProcess);
+    return { ok: true, reason: "public-resolver" };
+  } catch (error) {
+    if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+    return {
+      ok: false,
+      reason: "public-resolver-failed",
+      diagnostic: safeExtractorDiagnostic(String(error?.message || ""), null)
+    };
+  } finally {
+    fs.rm(inputPath, { force: true }, () => {});
+  }
+}
+
 async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess) {
   const inputPath = path.join(directory, "source.mp4");
   try {
@@ -702,6 +780,36 @@ app.post("/api/convert", async (req, res) => {
     if (process.env.EASYDOWN_API_TOKEN && providerFallback.reason !== "provider-no-media") {
       console.warn("ReelTone provider fallback failed:", String(providerFallback.reason || "unknown").slice(0, 80));
     }
+
+    // Instagram can serve login/rate-limit walls to anonymous serverless IPs.
+    // Resolve only the supplied public Reel URL, then download directly from an
+    // allow-listed Instagram CDN host and encode the MP3 in this function.
+    const publicResolver = await tryPublicResolverToMp3(
+      validated.url,
+      directory,
+      outputPath,
+      quality,
+      fallbackController.signal,
+      (process) => { fallbackChild = process; }
+    );
+
+    if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
+      cleanup();
+      return;
+    }
+    if (publicResolver.ok && fs.existsSync(outputPath)) {
+      await streamResult();
+      return;
+    }
+    if (publicResolver.reason === "duration-limit") {
+      cleanup();
+      return res.status(413).json({ error: "This Reel exceeds the 20-minute processing limit." });
+    }
+    if (publicResolver.reason === "media-too-large") {
+      cleanup();
+      return res.status(413).json({ error: "This video file is too large for the online converter." });
+    }
+    console.warn("ReelTone public resolver fallback failed:", String(publicResolver.reason || "unknown").slice(0, 80));
 
     // Next use public Reel HTML when it exposes a CDN media URL.
     // This avoids depending solely on yt-dlp's Instagram extractor.
