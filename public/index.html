@@ -180,8 +180,12 @@
           <p>No file upload or Instagram login is required. ReelTone fetches audio through its own Vercel conversion function. If Instagram doesn't expose media directly, the public Reel URL is sent to a third-party link resolver to obtain the public media URL. Never enter your Instagram password here.</p>
         </details>
         <details>
+          <summary>How are private or login-gated Reels handled?<span aria-hidden="true">+</span></summary>
+          <p>When Instagram explicitly identifies a Reel as private or login-required, ReelTone shows that specific status. Sometimes Instagram only returns “no media”; in that case the app says no public video was found instead of guessing whether the post is private, removed, or temporarily restricted.</p>
+        </details>
+        <details>
           <summary>Why didn't a link convert?<span aria-hidden="true">+</span></summary>
-          <p>Instagram availability can change. Check that the link is correct and public, then try again. Some links may be temporarily unavailable to the converter.</p>
+          <p>Instagram availability and anonymous request limits can change. Check the link, wait a few minutes if the source is rate-limiting requests, and try again. Repeated retries won't make private or login-gated media public.</p>
         </details>
       </div>
     </section>
