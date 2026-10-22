@@ -71,6 +71,15 @@ const byId = <T extends HTMLElement>(id: string): T => {
   let audioDownloadName = "reeltone.mp3";
   let cancelRequested = false;
 
+
+  function getErrorName(error: unknown): string {
+    if (error instanceof Error) return error.name;
+    if (error !== null && typeof error === "object" && "name" in error) {
+      return String((error as { name?: unknown }).name || "Error");
+    }
+    return "";
+  }
+
   function show(element: HTMLElement, visible: boolean): void {
     element.hidden = !visible;
   }
@@ -143,7 +152,8 @@ const byId = <T extends HTMLElement>(id: string): T => {
     pasteButton.disabled = value;
     convertButton.disabled = value;
     cancelButton.disabled = !value;
-    convertButton.querySelector(".button-label").textContent = value ? "Converting…" : "Convert to MP3";
+    const buttonLabel = convertButton.querySelector<HTMLElement>(".button-label");
+    if (buttonLabel) buttonLabel.textContent = value ? "Converting…" : "Convert to MP3";
   }
 
   function validateUrl(value: string): boolean {
@@ -462,7 +472,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
       }
       finishSuccess(blob);
     } catch (error) {
-      if (error && error.name === "AbortError") {
+      if (getErrorName(error) === "AbortError") {
         if (cancelRequested) {
           showError("Conversion cancelled", "No problem. Paste a Reel link whenever you're ready.");
         }

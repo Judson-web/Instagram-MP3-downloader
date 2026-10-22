@@ -73,6 +73,24 @@ type MediaAssetAttempt =
   | { ok: true; response: globalThis.Response; url: string; contentLength: number }
   | { ok: false; reason: string; retryAfterSeconds?: number };
 
+
+type ErrorField = "name" | "message" | "stderr" | "exitCode";
+
+function errorField(error: unknown, field: ErrorField): unknown {
+  if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+  if (error instanceof Error && field === "name") return error.name;
+  if (error instanceof Error && field === "message") return error.message;
+  return (error as Record<string, unknown>)[field];
+}
+
+function errorName(error: unknown): string {
+  return String(errorField(error, "name") || "Error");
+}
+
+function errorMessage(error: unknown): string {
+  return String(errorField(error, "message") || "");
+}
+
 function sendApiError(res: Response, status: number, payload: ApiErrorPayload): Response {
   res.set("Cache-Control", "no-store");
   if (payload.retryAfterSeconds !== undefined) {
@@ -347,11 +365,11 @@ async function checkRateLimit(ip: string): Promise<boolean> {
   return Number(rows[0]?.request_count || 0) <= MAX_REQUESTS_PER_HOUR;
 }
 
-function safeExtractorDiagnostic(stderr: unknown, error: any): string {
+function safeExtractorDiagnostic(stderr: unknown, error: unknown): string {
   const combined = [
     String(stderr || ""),
-    String(error?.stderr || ""),
-    String(error?.message || "")
+    String(errorField(error, "stderr") || ""),
+    errorMessage(error)
   ].join("\n");
   const redacted = combined
     .replace(/https?:\/\/[^\s"'<>]+/gi, "[url]")
@@ -363,9 +381,9 @@ function safeExtractorDiagnostic(stderr: unknown, error: any): string {
   return lines.slice(-3).join(" | ").slice(0, 500) || "no extractor diagnostic";
 }
 
-function safeConversionError(error: any, timedOut: boolean): string {
+function safeConversionError(error: unknown, timedOut: boolean): string {
   if (timedOut) return "This Reel took too long to process. Try a shorter Reel.";
-  const message = String(error?.stderr || error?.message || "").toLowerCase();
+  const message = String(errorField(error, "stderr") || errorMessage(error)).toLowerCase();
 
   if (/(?:duration[^\n]{0,80}(?:exceeds?|greater than|longer than|above|over|>\s*\d+)|(?:exceeds?|greater than|longer than|over|>\s*\d+)[^\n]{0,80}duration|video too long|filtered out[^\n]{0,80}duration|duration[^\n]{0,80}(?:limit|1200\s*(?:s|seconds)|20\s*minutes))/i.test(message)) {
     return "This video is longer than the 20-minute limit.";
@@ -568,6 +586,8 @@ async function fetchInstagramMediaAsset(rawUrl: string, parentSignal: AbortSigna
 }
 
 async function encodeDownloadedVideo(inputPath: string, outputPath: string, quality: QualityPreset, signal: AbortSignal, setProcess: ProcessSetter): Promise<void> {
+  if (!ffmpegPath) return Promise.reject(new Error("FFmpeg binary is not configured"));
+  const executablePath: string = ffmpegPath;
   return new Promise<void>((resolve, reject) => {
     if (signal.aborted) {
       reject(new Error("conversion cancelled"));
@@ -577,7 +597,7 @@ async function encodeDownloadedVideo(inputPath: string, outputPath: string, qual
     let finished = false;
     let timedOut = false;
     let stderr = "";
-    const child = spawn(ffmpegPath, [
+    const child = spawn(executablePath, [
       "-hide_banner",
       "-nostdin",
       "-loglevel", "error",
@@ -616,7 +636,7 @@ async function encodeDownloadedVideo(inputPath: string, outputPath: string, qual
       stderr = (stderr + chunk.toString()).slice(-4000);
     });
     child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
+    child.once("close", (code: number | null) => {
       if (signal.aborted) return finish(new Error("conversion cancelled"));
       if (timedOut) return finish(new Error("ffmpeg timeout"));
       if (code !== 0) return finish(new Error(stderr || "ffmpeg could not encode audio"));
@@ -626,7 +646,7 @@ async function encodeDownloadedVideo(inputPath: string, outputPath: string, qual
         }
         return finish(null);
       } catch (error) {
-        return finish(error);
+        return finish(error instanceof Error ? error : new Error(String(error)));
       }
     });
   });
@@ -659,8 +679,8 @@ async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outp
       const upstreamText = String(payload?.code || "") + " " + String(payload?.error || payload?.message || "");
       const lower = upstreamText.toLowerCase();
       let reason = "no-public-media";
-      if (payload.private === true || payload.is_private === true || /private|is_private/.test(lower)) reason = "private-reel";
-      else if (payload.login_required === true || payload.requires_login === true || /login[-_ ]required|sign in|authentication required/.test(lower)) reason = "login-required";
+      if (payload?.private === true || payload?.is_private === true || /private|is_private/.test(lower)) reason = "private-reel";
+      else if (payload?.login_required === true || payload?.requires_login === true || /login[-_ ]required|sign in|authentication required/.test(lower)) reason = "login-required";
       else if (/rate.?limit|too many requests|429/.test(lower)) {
         reason = /instagram|source/.test(lower) ? "instagram-rate-limited" : "resolver-rate-limited";
       }
@@ -668,11 +688,12 @@ async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outp
       return { ok: false, reason, retryAfterSeconds: parseRetryAfterSeconds(String((payload as any)?.retry_after || (payload as any)?.retryAfter || "")), detail: upstreamText.slice(0, 180) };
     }
 
-    const candidates = payload.media.filter((item) =>
-      item &&
-      item.type === "video" &&
-      typeof item.url === "string" &&
-      isAllowedMediaAsset(item.url)
+    const candidates = payload.media.filter(
+      (item): item is ResolverMediaItem & { type: "video"; url: string } =>
+        !!item &&
+        item.type === "video" &&
+        typeof item.url === "string" &&
+        isAllowedMediaAsset(item.url)
     );
     const selected = candidates[0];
     if (!selected) return { ok: false, reason: "resolver-no-video" };
@@ -705,8 +726,8 @@ async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outp
       );
     } catch (error) {
       fs.rmSync(inputPath, { force: true });
-      if (error?.name === "AbortError" || error?.name === "TimeoutError") return { ok: false, reason: "media-download-timeout" };
-      if (/size limit/.test(String(error?.message || ""))) return { ok: false, reason: "media-too-large" };
+      if (errorName(error) === "AbortError" || errorName(error) === "TimeoutError") return { ok: false, reason: "media-download-timeout" };
+      if (/size limit/.test(errorMessage(error))) return { ok: false, reason: "media-too-large" };
       return { ok: false, reason: "media-download-failed" };
     }
 
@@ -723,7 +744,7 @@ async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outp
     return {
       ok: false,
       reason: "public-resolver-failed",
-      diagnostic: safeExtractorDiagnostic(String(error?.message || ""), null)
+      diagnostic: safeExtractorDiagnostic(errorMessage(error), null)
     };
   } finally {
     fs.rm(inputPath, { force: true }, () => {});
@@ -770,8 +791,8 @@ async function tryPublicHtmlToMp3(sourceUrl: string, directory: string, outputPa
         });
       } catch (error) {
         if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
-        lastReason = error?.name === "TimeoutError" ? "instagram-page-timeout" : "instagram-page-unavailable";
-        pageDiagnostics.push(`${pageLabel}:fetch-${error?.name || "error"}`);
+        lastReason = errorName(error) === "TimeoutError" ? "instagram-page-timeout" : "instagram-page-unavailable";
+        pageDiagnostics.push(`${pageLabel}:fetch-${errorName(error) || "error"}`);
         continue;
       }
 
@@ -868,7 +889,7 @@ async function tryPublicHtmlToMp3(sourceUrl: string, directory: string, outputPa
       );
     } catch (error) {
       fs.rmSync(inputPath, { force: true });
-      if (error?.name === "AbortError") return { ok: false, reason: "media-download-timeout" };
+      if (errorName(error) === "AbortError") return { ok: false, reason: "media-download-timeout" };
       if (/size limit/.test(String(error?.message || ""))) return { ok: false, reason: "media-too-large" };
       return { ok: false, reason: "media-download-failed" };
     }
@@ -935,6 +956,7 @@ async function tryEasyDownToMp3(sourceUrl: string, directory: string, outputPath
     const chosen = candidates.find((item) => typeof item?.url === "string" && isAllowedMediaAsset(item.url));
     if (!chosen) return { ok: false, reason: "provider-no-media" };
 
+    if (!chosen || typeof chosen.url !== "string" || !isAllowedMediaAsset(chosen.url)) return { ok: false, reason: "provider-no-media" };
     const downloaded = await fetchInstagramMediaAsset(chosen.url, parentSignal);
     if ("reason" in downloaded) return { ok: false, reason: downloaded.reason || "media-not-public" };
     if (downloaded.contentLength > MAX_SOURCE_BYTES) {
@@ -1024,7 +1046,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       return sendApiError(res, 429, { code: "RATE_LIMITED", title: "Hourly conversion limit reached", error: "This site allows eight conversion attempts per hour per visitor. Please wait for the limit to reset before trying again.", retryable: true, category: "rate-limit" });
     }
   } catch (error) {
-    console.error("Rate-limit database is unavailable:", error?.name || "unknown error");
+    console.error("Rate-limit database is unavailable:", errorName(error) || "unknown error");
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "The converter is temporarily unavailable", error: "The rate-limit database could not be reached. No conversion was started; please try again shortly.", retryable: true, category: "service" });
   }
 
@@ -1284,7 +1306,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
 
     console.warn(
       "ReelTone conversion failed:",
-      error?.exitCode ?? error?.name ?? "unknown error",
+      errorField(error, "exitCode") ?? errorName(error) ?? "unknown error",
       "|",
       safeExtractorDiagnostic(stderrTail, error)
     );
