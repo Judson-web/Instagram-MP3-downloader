@@ -264,6 +264,8 @@ app.post("/api/convert", async (req, res) => {
     }
 
     if (!fs.existsSync(outputPath) || !fs.statSync(outputPath).isFile()) {
+      const diagnostic = safeExtractorDiagnostic(stderrTail + "\n" + stdoutTail, null);
+      console.warn("ReelTone extractor produced no MP3:", diagnostic);
       cleanup();
       return res.status(502).json({
         error: safeConversionError({ stderr: stderrTail + "\n" + stdoutTail }, timedOut)
