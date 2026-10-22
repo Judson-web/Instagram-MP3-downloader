@@ -491,7 +491,7 @@ async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality,
     if (duration > MAX_DURATION_SECONDS) return { ok: false, reason: "duration-limit" };
 
     const media = await fetchInstagramMediaAsset(selected.url, parentSignal);
-    if (!media.ok) return { ok: false, reason: media.reason };
+    if (!media.ok) return { ok: false, reason: media.reason || "media-not-public" };
     if (media.contentLength > MAX_SOURCE_BYTES) {
       await media.response.body?.cancel().catch(() => {});
       return { ok: false, reason: "media-too-large" };
@@ -634,7 +634,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
     if (!selected) return { ok: false, reason: lastReason, diagnostic: pageDiagnostics.join(",").slice(0, 300) };
 
     const media = await fetchInstagramMediaAsset(selected.url, parentSignal);
-    if (!media.ok) return media;
+    if ("reason" in media) return { ok: false, reason: media.reason || "media-not-public" };
 
     let totalBytes = 0;
     const limiter = new Transform({
@@ -647,7 +647,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
 
     try {
       await pipeline(
-        Readable.fromWeb(media.response.body),
+        Readable.fromWeb(media.response.body as any),
         limiter,
         fs.createWriteStream(inputPath, { flags: "wx" }),
         { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
@@ -714,7 +714,7 @@ async function tryEasyDownToMp3(sourceUrl, directory, outputPath, quality, paren
     if (!chosen) return { ok: false, reason: "provider-no-media" };
 
     const downloaded = await fetchInstagramMediaAsset(chosen.url, parentSignal);
-    if (!downloaded.ok) return { ok: false, reason: downloaded.reason };
+    if (!downloaded.ok) return { ok: false, reason: downloaded.reason || "media-not-public" };
     if (downloaded.contentLength > MAX_SOURCE_BYTES) {
       await downloaded.response.body?.cancel().catch(() => {});
       return { ok: false, reason: "media-too-large" };
