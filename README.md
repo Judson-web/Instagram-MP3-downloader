@@ -32,7 +32,7 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 - **Deployment:** Vercel
 - **Checks:** TypeScript compiler, Node.js privacy unit tests, and GitHub Actions
 
-TypeScript is the maintained application source, including the preview-image build step. Browser and Node.js runtime JavaScript plus the PNG preview are generated during the build and excluded from source control. TypeScript strict mode is enabled; strict-null checking remains a separate migration step.
+TypeScript is the maintained application source, including the preview-image build step. Browser and Node.js runtime JavaScript plus the PNG preview are generated during the build and excluded from source control. The TypeScript compiler runs with `strict: true`, including strict-null and implicit-any checks.
 
 ## Local development
 
@@ -40,13 +40,13 @@ Requirements: Node.js 22 or later and a Neon Postgres database. The optional thi
 
 1. Clone this repository.
 2. Install dependencies with `npm install`.
-3. Set DATABASE_URL to your Neon connection string.
-4. Set RATE_LIMIT_SECRET to a cryptographically random value of at least 32 bytes.
-5. Optionally set MEDIA_RESOLVER_URL to a trusted HTTPS resolver endpoint and EASYDOWN_API_TOKEN to enable the EasyDown integration. Leave them unset to avoid forwarding submitted links to these services.
-6. Run npm run check to type-check the application.
-7. Run npm test to verify IP anonymization behavior.
-8. Run npm run build to test and compile the TypeScript runtime files.
-9. Run npm start and open http://localhost:3000.
+3. Set `DATABASE_URL` to your Neon connection string.
+4. Set `RATE_LIMIT_SECRET` to a cryptographically random value of at least 32 bytes.
+5. Optionally set `MEDIA_RESOLVER_URL` to a trusted HTTPS resolver endpoint and `EASYDOWN_API_TOKEN` to enable the EasyDown integration. Leave them unset to avoid forwarding submitted links to these services.
+6. Run `npm run check` to type-check the application.
+7. Run `npm test` to verify IP anonymization behavior.
+8. Run `npm run build` to test and compile the TypeScript runtime files.
+9. Run `npm start` and open http://localhost:3000.
 
 Keep environment files and secret values out of Git. Configure deployment variables through the hosting provider's environment settings.
 
@@ -63,6 +63,14 @@ The current source cooldown table is defined in [`migrations/001-source-cooldown
 
 The service health check confirms the app can connect to its database. It does not guarantee that the upstream social-media source is available.
 
+## Resolver and URL privacy
+
+ReelTone checks the public Instagram page/embed directly before using any third-party media provider. The optional generic media resolver is disabled by default and is not hard-coded in source. Configure MEDIA_RESOLVER_URL with a trusted HTTPS endpoint only after reviewing its privacy policy. If enabled, the resolver receives the submitted Instagram URL and may log it under its own policies.
+
+The optional EasyDown integration runs only when EASYDOWN_API_TOKEN is configured, and only after the direct Instagram attempt. When enabled, EasyDown receives the submitted URL for media lookup. With both integrations disabled, ReelTone uses direct Instagram extraction and its local yt-dlp/FFmpeg path.
+
+MP3 download filenames contain a UTC timestamp and random suffix, helping avoid collisions between files with identical titles.
+
 ## Security
 
 The deployment applies a nonce-based Content Security Policy, HSTS, anti-framing controls, MIME-sniffing protection, a restrictive Permissions Policy, and cross-origin response policies. Visitor rate-limit identifiers are truncated to an IPv4 `/24` or IPv6 `/64` network prefix, then pseudonymized using keyed HMAC-SHA-256 with a production secret of at least 32 bytes. Raw client IPs and truncated network prefixes are not stored as rate-limit keys.
@@ -78,11 +86,3 @@ Use public links only. Private or login-gated media may not be available. Downlo
 ## License
 
 ReelTone is distributed under the [Apache License 2.0](LICENSE).
-
-## Resolver and URL privacy
-
-ReelTone checks the public Instagram page/embed directly before using any third-party media provider. The optional generic media resolver is disabled by default and is not hard-coded in source. Configure MEDIA_RESOLVER_URL with a trusted HTTPS endpoint only after reviewing its privacy policy. If enabled, the resolver receives the submitted Instagram URL and may log it under its own policies.
-
-The optional EasyDown integration runs only when EASYDOWN_API_TOKEN is configured, and only after the direct Instagram attempt. When enabled, EasyDown receives the submitted URL for media lookup. With both integrations disabled, ReelTone uses direct Instagram extraction and its local yt-dlp/FFmpeg path.
-
-MP3 download filenames contain a UTC timestamp and random suffix, helping avoid collisions between files with identical titles.
