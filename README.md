@@ -27,7 +27,7 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 ## Technology
 
 - **Application:** TypeScript, Node.js, Express
-- **Audio:** FFmpeg and yt-dlp tooling
+- **Audio:** FFmpeg, yt-dlp tooling, and an optional dedicated Cobalt extractor fallback
 - **Database:** Neon Postgres
 - **Deployment:** Vercel
 - **Checks:** TypeScript compiler, Node.js privacy unit tests, and GitHub Actions
@@ -36,13 +36,13 @@ TypeScript is the maintained application source, including the preview-image bui
 
 ## Local development
 
-Requirements: Node.js 22 or later and a Neon Postgres database. The optional third-party media resolver is disabled unless MEDIA_RESOLVER_URL is configured.
+Requirements: Node.js 22 or later and a Neon Postgres database. Optional extractor providers are configured through environment variables; the application never hardcodes their hostnames.
 
 1. Clone this repository.
 2. Install dependencies with `npm install`.
 3. Set `DATABASE_URL` to your Neon connection string.
 4. Set `RATE_LIMIT_SECRET` to a cryptographically random value of at least 32 bytes.
-5. Optionally set `MEDIA_RESOLVER_URL` to a trusted HTTPS resolver endpoint and `EASYDOWN_API_TOKEN` to enable the EasyDown integration. Leave them unset to avoid forwarding submitted links to these services.
+5. Optionally set `COBALT_API_URL` and `COBALT_API_KEY` for a dedicated Cobalt API instance. ReelTone sends the submitted URL to it only after direct Instagram extraction fails. `MEDIA_RESOLVER_URL` and `EASYDOWN_API_TOKEN` enable additional optional providers; leave those unset unless you trust their data-handling policies.
 6. Run `npm run check` to type-check the application.
 7. Run `npm test` to verify IP anonymization behavior.
 8. Run `npm run build` to test and compile the TypeScript runtime files.
@@ -65,9 +65,9 @@ The service health check confirms the app can connect to its database. It does n
 
 ## Resolver and URL privacy
 
-ReelTone checks the public Instagram page/embed directly before using any third-party media provider. The optional generic media resolver is disabled by default and is not hard-coded in source. Configure MEDIA_RESOLVER_URL with a trusted HTTPS endpoint only after reviewing its privacy policy. If enabled, the resolver receives the submitted Instagram URL and may log it under its own policies.
+ReelTone checks the public Instagram page/embed directly first. If that fails, the optional Cobalt fallback is enabled only when both `COBALT_API_URL` and `COBALT_API_KEY` are configured. Cobalt then receives the submitted Instagram URL and may log it under its own policies. Use a dedicated instance and review its data-handling policy.
 
-The optional EasyDown integration runs only when EASYDOWN_API_TOKEN is configured, and only after the direct Instagram attempt. When enabled, EasyDown receives the submitted URL for media lookup. With both integrations disabled, ReelTone uses direct Instagram extraction and its local yt-dlp/FFmpeg path.
+The generic media resolver is disabled unless `MEDIA_RESOLVER_URL` is configured to a trusted HTTPS endpoint. The optional EasyDown integration requires `EASYDOWN_API_TOKEN`. Each enabled provider receives the submitted URL when ReelTone reaches that fallback. If providers are not configured or unavailable, ReelTone continues with the local yt-dlp/FFmpeg path.
 
 MP3 download filenames contain a UTC timestamp and random suffix, helping avoid collisions between files with identical titles.
 
