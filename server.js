@@ -191,12 +191,31 @@ function isAllowedMediaAsset(raw) {
 }
 
 function extractInstagramVideoVersions(html) {
+  const directVideos = [];
+  const directPattern = /\\?"video_url\\?"\s*:\s*\\?"(https?:[^"]+)/gi;
+  let directMatch;
+  while ((directMatch = directPattern.exec(html)) !== null) {
+    let url = directMatch[1];
+    url = url
+      .replace(/\\u00253D/gi, "%3D")
+      .replace(/\\u0026/gi, "&")
+      .replace(/\\+\//g, "/")
+      .replace(/\\+$/g, "")
+      .replace(/\\/g, "");
+    if (isAllowedMediaAsset(url) && !directVideos.some((item) => item.url === url)) {
+      directVideos.push({ url, width: 0, height: 0 });
+    }
+  }
+
   const marker = "video_versions";
   const keyPosition = html.indexOf(marker);
-  if (keyPosition < 0) return [];
+  if (keyPosition < 0) return directVideos;
+
   const colon = html.indexOf(":", keyPosition + marker.length);
   const arrayStart = html.indexOf("[", colon);
-  if (colon < 0 || arrayStart < 0 || arrayStart - colon > 24) return [];
+  if (colon < 0 || arrayStart < 0 || arrayStart - colon > 24) {
+    return directVideos;
+  }
 
   let depth = 0;
   let quoted = false;
@@ -221,23 +240,24 @@ function extractInstagramVideoVersions(html) {
     }
   }
 
-  if (arrayEnd < 0) return [];
+  if (arrayEnd < 0) return directVideos;
   try {
     const versions = JSON.parse(
       html.slice(arrayStart, arrayEnd)
         .replaceAll("\\/", "/")
         .replaceAll("\\u0026", "&")
     );
-    if (!Array.isArray(versions)) return [];
-    return versions
+    if (!Array.isArray(versions)) return directVideos;
+    const validVersions = versions
       .filter((item) => item && typeof item.url === "string" && isAllowedMediaAsset(item.url))
       .sort((a, b) => (Number(b.width || 0) * Number(b.height || 0)) -
                       (Number(a.width || 0) * Number(a.height || 0)));
+    const combined = [...validVersions, ...directVideos];
+    return combined.filter((item, index) => combined.findIndex((x) => x.url === item.url) === index);
   } catch {
-    return [];
+    return directVideos;
   }
 }
-
 function getInstagramVideoDuration(html) {
   const match = html.match(/"video_duration"\s*:\s*(\d+(?:\.\d+)?)/i);
   return match ? Number(match[1]) : null;
@@ -359,40 +379,82 @@ async function encodeDownloadedVideo(inputPath, outputPath, quality, signal, set
 async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess) {
   const inputPath = path.join(directory, "source.mp4");
   try {
-    const pageResponse = await fetch(sourceUrl, {
-      method: "GET",
-      redirect: "follow",
-      headers: {
-        "User-Agent": INSTAGRAM_BROWSER_UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.instagram.com/"
-      },
-      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(20000)])
-    });
+    const canonical = new URL(sourceUrl);
+    const embedPath = canonical.pathname.replace(/\/+$/, "") + "/embed/captioned/";
+    const pageCandidates = [
+      "https://www.instagram.com" + embedPath,
+      sourceUrl
+    ];
 
-    if (!pageResponse.ok) return { ok: false, reason: "instagram-page-unavailable" };
-    const pageHost = new URL(pageResponse.url || sourceUrl).hostname.toLowerCase();
-    if (!ALLOWED_HOSTS.has(pageHost)) return { ok: false, reason: "instagram-page-redirected" };
+    let selected = null;
+    let duration = null;
+    let lastReason = "no-public-video-metadata";
 
-    const pageLength = Number(pageResponse.headers.get("content-length") || 0);
-    if (pageLength > 5 * 1024 * 1024) {
-      await pageResponse.body?.cancel().catch(() => {});
-      return { ok: false, reason: "instagram-page-too-large" };
+    // The embed route can expose a public post's media metadata even when
+    // the normal page responds with a login wall to datacenter requests.
+    for (const pageUrl of pageCandidates) {
+      let pageResponse;
+      try {
+        pageResponse = await fetch(pageUrl, {
+          method: "GET",
+          redirect: "follow",
+          headers: {
+            "User-Agent": INSTAGRAM_BROWSER_UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.instagram.com/"
+          },
+          signal: AbortSignal.any([parentSignal, AbortSignal.timeout(14000)])
+        });
+      } catch (error) {
+        if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+        lastReason = error?.name === "TimeoutError" ? "instagram-page-timeout" : "instagram-page-unavailable";
+        continue;
+      }
+
+      const finalUrl = pageResponse.url || pageUrl;
+      const finalHost = new URL(finalUrl).hostname.toLowerCase();
+      if (!pageResponse.ok || !ALLOWED_HOSTS.has(finalHost)) {
+        await pageResponse.body?.cancel().catch(() => {});
+        lastReason = "instagram-page-unavailable";
+        continue;
+      }
+
+      const pageLength = Number(pageResponse.headers.get("content-length") || 0);
+      if (pageLength > 5 * 1024 * 1024) {
+        await pageResponse.body?.cancel().catch(() => {});
+        lastReason = "instagram-page-too-large";
+        continue;
+      }
+
+      let html;
+      try {
+        html = await pageResponse.text();
+      } catch {
+        lastReason = "instagram-page-unavailable";
+        continue;
+      }
+      if (html.length > 5 * 1024 * 1024) {
+        lastReason = "instagram-page-too-large";
+        continue;
+      }
+
+      const candidateDuration = getInstagramVideoDuration(html);
+      if (candidateDuration !== null) {
+        duration = candidateDuration;
+        if (duration > MAX_DURATION_SECONDS) return { ok: false, reason: "duration-limit" };
+      }
+
+      const versions = extractInstagramVideoVersions(html);
+      if (versions.length) {
+        selected = versions[0];
+        break;
+      }
+      lastReason = "no-public-video-metadata";
     }
 
-    const html = await pageResponse.text();
-    if (html.length > 5 * 1024 * 1024) return { ok: false, reason: "instagram-page-too-large" };
+    if (!selected) return { ok: false, reason: lastReason };
 
-    const duration = getInstagramVideoDuration(html);
-    if (duration !== null && duration > MAX_DURATION_SECONDS) {
-      return { ok: false, reason: "duration-limit" };
-    }
-
-    const versions = extractInstagramVideoVersions(html);
-    if (!versions.length) return { ok: false, reason: "no-public-video-metadata" };
-
-    const selected = versions[0];
     const media = await fetchInstagramMediaAsset(selected.url, parentSignal);
     if (!media.ok) return media;
 
@@ -433,7 +495,6 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
     fs.rm(path.join(directory, "source.mp4"), { force: true }, () => {});
   }
 }
-
 
 async function tryEasyDownToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess) {
   const token = process.env.EASYDOWN_API_TOKEN;
