@@ -103,24 +103,56 @@ function classifyConversionFailure(evidence: string, timedOut = false): { status
 
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.locals.cspNonce = crypto.randomBytes(18).toString("base64");
+  next();
+});
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
+      defaultSrc: ["'none'"],
+      scriptSrc: ["'self'", (_req: Request, res: Response) => "'nonce-" + res.locals.cspNonce + "'"],
       styleSrc: ["'self'"],
       imgSrc: ["'self'", "data:"],
-      connectSrc: ["'self'"],
       fontSrc: ["'self'"],
-      objectSrc: ["'none'"],
+      connectSrc: ["'self'"],
+      mediaSrc: ["'self'", "blob:"],
+      workerSrc: ["'self'", "blob:"],
+      manifestSrc: ["'self'"],
       baseUri: ["'self'"],
       formAction: ["'self'"],
-      frameAncestors: ["'none'"]
+      frameAncestors: ["'none'"],
+      frameSrc: ["'none'"],
+      objectSrc: ["'none'"],
+      upgradeInsecureRequests: []
     }
   },
+  crossOriginEmbedderPolicy: false,
+  crossOriginOpenerPolicy: { policy: "same-origin" },
+  crossOriginResourcePolicy: { policy: "same-origin" },
+  originAgentCluster: true,
+  hsts: { maxAge: 63072000, includeSubDomains: true, preload: true },
+  noSniff: true,
+  xssFilter: false,
+  xDnsPrefetchControl: { allow: false },
+  xDownloadOptions: true,
+  xPermittedCrossDomainPolicies: { permittedPolicies: "none" },
+  frameguard: { action: "deny" },
   referrerPolicy: { policy: "no-referrer" }
 }));
 app.use(express.json({ limit: "12kb", strict: true }));
+
+// Render the entry page with a per-response nonce for structured-data scripts.
+app.get("/", (req: Request, res: Response, next: NextFunction) => {
+  fs.readFile(path.join(__dirname, "public", "index.html"), "utf8", (error, markup) => {
+    if (error) return next(error);
+    const nonce = String(res.locals.cspNonce || "");
+    const html = markup.replace(/<script type="application\\/ld\\+json">/g, '<script type="application/ld+json" nonce="' + nonce + '">');
+    res.set("Cache-Control", "no-cache");
+    res.type("html").send(html);
+  });
+});
 
 // Serve public assets in both Vercel and local deployments.
 app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true }));
