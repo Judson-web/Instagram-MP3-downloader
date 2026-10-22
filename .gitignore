@@ -1,0 +1,7 @@
+node_modules/
+dist/
+server.js
+public/app.js
+.env
+.env.*
+!.env.example

@@ -42,17 +42,22 @@ const byId = <T extends HTMLElement>(id: string): T => {
   const errorCategory = byId<HTMLSpanElement>("error-category");
   const resultFilename = byId<HTMLElement>("result-filename");
   const resultAuthor = byId<HTMLElement>("result-author");
+  const resultExpiry = byId<HTMLParagraphElement>("result-expiry");
   const retryButton = byId<HTMLButtonElement>("retry-button");
 
   const allowedHosts = new Set(["instagram.com", "www.instagram.com", "m.instagram.com"]);
   const regularPostPath = /^\/(?:reel|reels|p|tv)\/[A-Za-z0-9_-]+\/?$/i;
   const sharedPostPath = /^\/share\/reel\/[A-Za-z0-9_-]+\/?$/i;
+  const DOWNLOAD_URL_TTL_MS = 10 * 60 * 1000;
 
   let busy = false;
   let abortController: AbortController | null = null;
   let progressTimer: number | null = null;
   let progressStartedAt = 0;
   let audioObjectUrl: string | null = null;
+  let audioExpiresAt = 0;
+  let audioExpiryTimer: number | null = null;
+  let expiryCountdownTimer: number | null = null;
   let audioTitle = "";
   let audioAuthor = "";
   let audioDownloadName = "reeltone.mp3";
@@ -100,8 +105,30 @@ const byId = <T extends HTMLElement>(id: string): T => {
   }
 
   function revokeAudioUrl() {
+    if (audioExpiryTimer !== null) window.clearTimeout(audioExpiryTimer);
+    if (expiryCountdownTimer !== null) window.clearInterval(expiryCountdownTimer);
+    audioExpiryTimer = null;
+    expiryCountdownTimer = null;
     if (audioObjectUrl) URL.revokeObjectURL(audioObjectUrl);
     audioObjectUrl = null;
+    audioExpiresAt = 0;
+    downloadButton.disabled = true;
+  }
+
+  function updateExpiryStatus() {
+    if (!audioObjectUrl || audioExpiresAt === 0) return;
+
+    const remainingMs = audioExpiresAt - Date.now();
+    if (remainingMs <= 0) {
+      revokeAudioUrl();
+      resultExpiry.textContent = "This temporary download has expired. Convert the Reel again to create a fresh file.";
+      return;
+    }
+
+    const remainingSeconds = Math.ceil(remainingMs / 1000);
+    const minutes = String(Math.floor(remainingSeconds / 60)).padStart(2, "0");
+    const seconds = String(remainingSeconds % 60).padStart(2, "0");
+    resultExpiry.textContent = `Download link expires in ${minutes}:${seconds}.`;
   }
 
   function showInputError(message) {
@@ -213,6 +240,11 @@ const byId = <T extends HTMLElement>(id: string): T => {
     stopProgress();
     revokeAudioUrl();
     audioObjectUrl = URL.createObjectURL(blob);
+    audioExpiresAt = Date.now() + DOWNLOAD_URL_TTL_MS;
+    downloadButton.disabled = false;
+    resultExpiry.textContent = "Download link expires in 10:00.";
+    expiryCountdownTimer = window.setInterval(updateExpiryStatus, 1000);
+    audioExpiryTimer = window.setTimeout(updateExpiryStatus, DOWNLOAD_URL_TTL_MS);
     show(progressPanel, false);
     show(errorPanel, false);
     show(resultPanel, true);
@@ -353,8 +385,9 @@ const byId = <T extends HTMLElement>(id: string): T => {
   });
 
   downloadButton.addEventListener("click", () => {
-    if (!audioObjectUrl) {
-      showError("This MP3 is no longer available", "Convert the Reel again to create a fresh download.");
+    if (!audioObjectUrl || Date.now() >= audioExpiresAt) {
+      updateExpiryStatus();
+      showError("This download has expired", "Temporary download links expire after 10 minutes. Convert the Reel again to create a fresh download.");
       return;
     }
     const anchor = document.createElement("a");

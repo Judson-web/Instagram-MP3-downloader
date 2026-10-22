@@ -2,7 +2,7 @@
   "name": "instagram-mp3-downloader",
   "version": "2.0.0",
   "private": true,
-  "description": "ReelTone converts public Instagram Reel URLs into MP3 audio.",
+  "description": "A clean, temporary-link Instagram Reel to MP3 converter.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

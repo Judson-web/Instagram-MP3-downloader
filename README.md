@@ -15,6 +15,7 @@ ReelTone is a URL-first Instagram Reel to MP3 converter. Paste a public Reel or 
 
 - 128, 192, or 320 kbps MP3 output
 - Live progress feedback, cancel action, and a result/download card with Reel title and author when available
+- Download object URLs expire automatically after 10 minutes, with a visible countdown; the browser revokes the URL and clears the in-memory file when it expires or the tab closes
 - Distinct statuses for explicitly private Reels, login-required media, upstream rate limits, missing/unavailable posts, oversized videos, long videos, service errors, and ambiguous “no public media” responses
 - Safe host/path validation, allow-listed Instagram CDN hosts, request throttling, bounded download sizes, timeouts, and temporary-file cleanup
 - No Instagram password or account-cookie collection
@@ -25,9 +26,9 @@ ReelTone is a URL-first Instagram Reel to MP3 converter. Paste a public Reel or 
 - `src/client.ts`: typed browser interactions, validation, progress/error states, result metadata, MP3 downloads
 - `public/index.html` and `public/styles.css`: responsive, accessible UI
 - `tsconfig.json`: TypeScript compiler configuration
-- `server.js` and `public/app.js`: generated JavaScript runtime artifacts created during the Vercel build
+- `server.js` and `public/app.js`: generated at build time and excluded from Git; they are runtime outputs, not source files.
 
-The generated JavaScript files are deployment outputs. Make code changes in `src/*.ts`, then run the build to regenerate them.
+**TypeScript is the only maintained application code.** The build compiles `src/server.ts` for the Vercel Node runtime and `src/client.ts` for browsers, then creates the ignored runtime files. Browsers and Node execute JavaScript, so transpilation is required at deployment, but generated JavaScript is not committed or edited by hand.
 
 ## Build and run locally
 
@@ -63,7 +64,7 @@ ReelTone uses its own Neon project, `instagram-mp3-converter`, with database `re
 - `GET /api/health`: checks both the application and Neon database.
 - `POST /api/convert`: accepts JSON such as `{"url":"https://www.instagram.com/reel/SHORTCODE/","quality":"192"}`. On success the response is `audio/mpeg`; on failure it returns a typed JSON error with `code`, `title`, `error`, `retryable`, and `category`.
 
-Bitrate values are `128`, `192`, and `320`. The duration limit is 20 minutes, source downloads are capped at 150 MiB, each visitor is limited to eight attempts per hour, and media operations use bounded timeouts.
+Bitrate values are `128`, `192`, and `320`. The duration limit is 20 minutes, source downloads are capped at 150 MiB, each visitor is limited to eight attempts per hour, media operations use bounded timeouts, and the client-side download URL expires after 10 minutes. Downloaded audio is held in browser memory rather than persisted in Neon.
 
 ## Error classification
 

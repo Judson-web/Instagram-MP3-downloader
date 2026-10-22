@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#111018">
-  <meta name="description" content="Turn a public Instagram Reel into an MP3 in a few clicks with ReelTone. Choose your audio quality and download your track.">
+  <meta name="theme-color" content="#f7f6f2">
+  <meta name="description" content="Convert publicly accessible Instagram Reels to MP3 with ReelTone. Choose your bitrate and download the audio without an account.">
   <meta property="og:title" content="ReelTone · Reel to MP3">
-  <meta property="og:description" content="One link. Your soundtrack. Convert public Instagram Reels to MP3 audio.">
+  <meta property="og:description" content="A straightforward way to convert public Instagram Reels to MP3 audio.">
   <meta property="og:type" content="website">
   <title>ReelTone · Reel to MP3</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%239c7bff'/%3E%3Cpath d='M9 22h4l3-9 5 17 4-13 3 5h3' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
@@ -14,9 +14,6 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <div class="ambient ambient-one" aria-hidden="true"></div>
-  <div class="ambient ambient-two" aria-hidden="true"></div>
-
   <header class="site-header">
     <a class="brand" href="/" aria-label="ReelTone home">
       <span class="brand-mark" aria-hidden="true">
@@ -30,14 +27,14 @@
   <main>
     <section class="hero" aria-labelledby="hero-title">
       <div class="hero-copy">
-        <div class="eyebrow"><span class="eyebrow-dot"></span> REEL TO MP3, MADE SIMPLE</div>
-        <h1 id="hero-title">Your Reel.<br><span>Your soundtrack.</span></h1>
-        <p class="hero-subtitle">That sound you can’t stop replaying? Bring it with you. Paste a public Reel link and turn it into an MP3.</p>
+        <div class="eyebrow"><span class="eyebrow-dot"></span> INSTAGRAM REEL TO MP3</div>
+        <h1 id="hero-title">Keep the sound.<br><span>Lose the scroll.</span></h1>
+        <p class="hero-subtitle">Paste a public Reel link, choose your bitrate, and download the audio. No sign-in or software to install.</p>
 
         <div class="trust-row" aria-label="Service features">
-          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>No login needed</span>
-          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>128–320 kbps</span>
-          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>MP3 download</span>
+          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>No account required</span>
+          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>128 / 192 / 320 kbps</span>
+          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>MP3 file</span>
         </div>
       </div>
 
@@ -47,25 +44,25 @@
             <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </div>
           <div>
-            <h2 id="converter-title">Convert a Reel</h2>
-            <p>Paste the link. We’ll handle the rest.</p>
+            <h2 id="converter-title">Reel to MP3</h2>
+            <p>Paste a public link to get started.</p>
           </div>
-          <span class="online-status"><span></span> READY</span>
+          <span class="online-status"><span></span> NO SIGN-IN</span>
         </div>
 
         <form id="convert-form" novalidate>
-          <label class="field-label" for="reel-url">INSTAGRAM REEL LINK</label>
+          <label class="field-label" for="reel-url">INSTAGRAM URL</label>
           <div class="url-input-wrap" id="url-input-wrap">
             <svg class="url-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 13.5a4.5 4.5 0 0 0 6.36 0l3-3A4.5 4.5 0 0 0 13 4.14l-1.72 1.72M14 10.5a4.5 4.5 0 0 0-6.36 0l-3 3A4.5 4.5 0 0 0 11 19.86l1.72-1.72" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <input id="reel-url" name="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://www.instagram.com/reel/..." aria-describedby="url-hint" maxlength="2048" required>
             <button class="paste-button" id="paste-button" type="button">Paste</button>
           </div>
-          <p class="field-hint" id="url-hint">Works with public Reels and video post links.</p>
+          <p class="field-hint" id="url-hint">Public Reels and video post links are supported.</p>
 
           <div class="quality-row">
             <div class="quality-copy">
               <label class="field-label" for="quality">AUDIO QUALITY</label>
-              <span>Higher bitrate, larger file</span>
+              <span>Balance file size and audio quality</span>
             </div>
             <div class="select-wrap">
               <select id="quality" name="quality" aria-label="Audio quality">
@@ -81,7 +78,7 @@
             <span class="button-label">Convert to MP3</span>
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-          <p class="secure-note"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.5 16 5v4.2c0 4-2.5 6.6-6 8.3-3.5-1.7-6-4.3-6-8.3V5l6-2.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="m7.3 9.8 1.7 1.7 3.6-3.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg> No Instagram password. No account connection.</p>
+          <p class="secure-note"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.5 16 5v4.2c0 4-2.5 6.6-6 8.3-3.5-1.7-6-4.3-6-8.3V5l6-2.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="m7.3 9.8 1.7 1.7 3.6-3.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg> No Instagram sign-in. Temporary downloads expire after 10 minutes.</p>
         </form>
 
         <section class="progress-panel" id="progress-panel" hidden aria-live="polite" aria-atomic="true">
@@ -108,7 +105,7 @@
           </div>
           <div class="result-heading">
             <h3>Your MP3 is ready</h3>
-            <p>Converted and ready to take with you.</p>
+            <p>Your audio is ready. Download it before the link expires.</p>
           </div>
           <div class="result-file">
             <div class="file-art" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
@@ -119,6 +116,7 @@
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Download MP3
           </button>
+          <p class="result-expiry" id="result-expiry">Download link expires in 10:00.</p>
           <button class="text-button new-conversion" id="new-conversion-button" type="button">Convert another Reel</button>
         </section>
 
@@ -129,20 +127,24 @@
         </section>
       </section>
 
-      <div class="visual-card" aria-hidden="true">
-        <div class="visual-orbit orbit-one"></div>
-        <div class="visual-orbit orbit-two"></div>
-        <div class="visual-glow"></div>
-        <div class="vinyl-disc"><div class="vinyl-grooves"></div><div class="vinyl-label"><span>RT</span></div></div>
-        <div class="float-tag tag-top"><span class="tag-equalizer"><i></i><i></i><i></i><i></i></span> AUDIO, UNLOCKED</div>
-        <div class="float-tag tag-bottom"><span class="mini-check">✓</span> <span>From Reel<br><b>to your playlist</b></span></div>
-        <div class="visual-caption"><span>01 / 03</span><span>PRESS PLAY ON YOUR DAY</span></div>
-      </div>
+      <aside class="visual-card" aria-label="Download details">
+        <div class="visual-card-head">
+          <span class="visual-label">DESIGNED FOR QUICK DOWNLOADS</span>
+          <span class="visual-index">01 / 03</span>
+        </div>
+        <h2>Audio, without the extra steps.</h2>
+        <p>A focused tool for publicly accessible links, with the important details up front.</p>
+        <div class="visual-detail-list">
+          <div class="visual-detail"><span class="detail-icon">01</span><span><strong>No account connection</strong><small>ReelTone never asks for your Instagram password.</small></span></div>
+          <div class="visual-detail"><span class="detail-icon">02</span><span><strong>Temporary download link</strong><small>Your browser download expires after 10 minutes.</small></span></div>
+          <div class="visual-detail"><span class="detail-icon">03</span><span><strong>Three bitrate options</strong><small>Choose 128, 192 or 320 kbps before converting.</small></span></div>
+        </div>
+      </aside>
     </section>
 
     <section class="steps-section" id="how-it-works" aria-labelledby="steps-title">
-      <div class="section-kicker">THREE LITTLE STEPS</div>
-      <h2 id="steps-title">From scroll to soundtrack.</h2>
+      <div class="section-kicker">HOW IT WORKS</div>
+      <h2 id="steps-title">Three steps. That’s it.</h2>
       <div class="steps-grid">
         <article class="step-item">
           <div class="step-number">01</div>
@@ -168,7 +170,7 @@
     <section class="faq-section" aria-labelledby="faq-title">
       <div>
         <div class="section-kicker">GOOD TO KNOW</div>
-        <h2 id="faq-title">A few quick answers.</h2>
+        <h2 id="faq-title">Questions, answered.</h2>
       </div>
       <div class="faq-list">
         <details>
@@ -193,8 +195,8 @@
 
   <footer class="site-footer">
     <a class="brand footer-brand" href="/" aria-label="ReelTone home"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M4 17h4l3-8 5 16 4-13 3 5h5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>reel<span class="brand-accent">tone</span></span></a>
-    <p>Made for the sounds you want to keep.</p>
-    <p class="footer-note">Use audio you have permission to download.</p>
+    <p>A simple tool for publicly accessible audio.</p>
+    <p class="footer-note">Only download audio you have permission to use.</p>
   </footer>
 </body>
 </html>
