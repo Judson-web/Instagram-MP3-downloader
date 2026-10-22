@@ -19,6 +19,7 @@ import { neon } from "@neondatabase/serverless";
 interface YoutubeDlOptions {
   noConfig?: boolean; noCacheDir?: boolean; noWarnings?: boolean; noPlaylist?: boolean; newline?: boolean;
   socketTimeout?: number; retries?: number; fragmentRetries?: number; matchFilter?: string;
+  format?: string; userAgent?: string; referer?: string;
   extractAudio?: boolean; audioFormat?: "mp3"; audioQuality?: string; ffmpegLocation?: string; output?: string;
 }
 type YoutubeDlChild = ChildProcess & PromiseLike<unknown>;
@@ -112,7 +113,7 @@ function sendApiError(res: Response, status: number, payload: ApiErrorPayload): 
 
 function classifyConversionFailure(evidence: string, timedOut = false): { status: number; payload: ApiErrorPayload } {
   const message = String(evidence || "").toLowerCase();
-  if (timedOut || /(?:conversion[-_ ]timeout|ffmpeg timeout|yt[-_ ]?dlp timeout|process.*(?:killed|timeout))/.test(message)) {
+  if (timedOut || /(?:conversion[-_ ]timeout|ffmpeg timeout|yt[-_ ]?dlp timeout)/.test(message)) {
     return { status: 504, payload: { code: "CONVERSION_TIMEOUT", title: "That conversion took too long", error: "Instagram or the media source did not respond in time. Try again later, or try a different public Reel.", retryable: true, category: "conversion" } };
   }
   if (/(?:^|[\\s:_-])private(?:$|[\\s,.:_-])|private account|private reel|only the owner|media is private|is_private/.test(message)) {
@@ -1116,7 +1117,7 @@ async function tryCobaltToMp3(
           }),
           // A dedicated API may be waking from idle. Allow it time to start,
           // then make one bounded retry rather than failing the whole conversion.
-          signal: AbortSignal.any([parentSignal, AbortSignal.timeout(9000)])
+          signal: AbortSignal.any([parentSignal, AbortSignal.timeout(12000)])
         });
       } catch (error) {
         if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
@@ -1589,12 +1590,14 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     child = youtubeDl.exec(validated.url, {
       noConfig: true,
       noCacheDir: true,
-      noWarnings: true,
+      noWarnings: false,
       noPlaylist: true,
       newline: true,
       socketTimeout: 8,
       retries: 0,
       fragmentRetries: 0,
+      userAgent: INSTAGRAM_BROWSER_UA,
+      referer: "https://www.instagram.com/",
       matchFilter: "duration <= " + MAX_DURATION_SECONDS,
       extractAudio: true,
       audioFormat: "mp3",
@@ -1633,12 +1636,65 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     // Some yt-dlp/FFmpeg combinations exit successfully but leave the source
     // in its original audio/video container instead of naming it audio.mp3.
     // Recover any real artifact instead of returning a false "no media" failure.
-    const audioExtensions = /\.(?:m4a|webm|opus|ogg|oga|aac|wav|flac|mp4|mov|mkv|aiff?)$/i;
-    const artifactCandidates = fs.readdirSync(directory, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && /^audio\./i.test(entry.name) && audioExtensions.test(entry.name))
+    const audioExtensions = /\.(?:mp3|m4a|webm|opus|ogg|oga|aac|wav|flac|mp4|mov|mkv|aiff?)$/i;
+    const findAudioArtifacts = () => fs.readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^(?:audio|source)\./i.test(entry.name) && audioExtensions.test(entry.name))
       .map((entry) => ({ path: path.join(directory, entry.name), name: entry.name, size: fs.statSync(path.join(directory, entry.name)).size }))
       .filter((entry) => entry.size >= 128)
       .sort((left, right) => right.size - left.size);
+
+    let artifactCandidates = findAudioArtifacts();
+
+    if (artifactCandidates.length === 0 && !fallbackController.signal.aborted) {
+      // Second pass: download the original video container instead of asking
+      // yt-dlp to extract audio. FFmpeg then performs the MP3 conversion locally.
+      // This catches cases where metadata lookup exits successfully but the
+      // extractor mode doesn't emit an audio file.
+      try {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          if (child && typeof child.kill === "function") child.kill("SIGKILL");
+        }, PROCESS_TIMEOUT_MS);
+        timeout.unref?.();
+
+        child = youtubeDl.exec(validated.url, {
+          noConfig: true,
+          noCacheDir: true,
+          noWarnings: false,
+          noPlaylist: true,
+          newline: true,
+          socketTimeout: 8,
+          retries: 0,
+          fragmentRetries: 0,
+          userAgent: INSTAGRAM_BROWSER_UA,
+          referer: "https://www.instagram.com/",
+          matchFilter: "duration <= " + MAX_DURATION_SECONDS,
+          format: "best[ext=mp4]/best",
+          output: path.join(directory, "source.%(ext)s")
+        }, {
+          cwd: directory,
+          env: { ...process.env, HOME: directory, TMPDIR: directory },
+          windowsHide: true
+        });
+        child.stderr?.on("data", (chunk: Buffer) => {
+          stderrTail = (stderrTail + chunk.toString()).slice(-8000);
+        });
+        child.stdout?.on("data", (chunk: Buffer) => {
+          stdoutTail = (stdoutTail + chunk.toString()).slice(-3000);
+        });
+        await child;
+        recordStage("yt-dlp-source", "process-exited");
+      } catch (error) {
+        stderrTail = (stderrTail + "\nsource-fetch:" + errorName(error)).slice(-8000);
+        recordStage("yt-dlp-source", timedOut ? "timeout" : errorName(error));
+      } finally {
+        if (timeout) clearTimeout(timeout);
+        timeout = null;
+        child = null;
+      }
+
+      artifactCandidates = findAudioArtifacts();
+    }
 
     for (const artifact of artifactCandidates) {
       try {
