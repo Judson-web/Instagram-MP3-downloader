@@ -267,3 +267,19 @@ h1 span { color: transparent; background: linear-gradient(95deg, #bfa8ff 5%, #a9
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* Indeterminate progress for serverless URL conversions */
+.progress-track.is-indeterminate > span {
+  width: 42%;
+  animation: progress-sweep 1.1s ease-in-out infinite alternate;
+}
+@keyframes progress-sweep {
+  from { transform: translateX(-8%); }
+  to { transform: translateX(145%); }
+}
+.progress-percent {
+  min-width: 42px;
+  text-align: right;
+  letter-spacing: .4px;
+  font-size: 8px;
+}
