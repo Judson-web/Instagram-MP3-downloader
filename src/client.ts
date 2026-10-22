@@ -106,7 +106,13 @@ const byId = <T extends HTMLElement>(id: string): T => {
   function chooseQuality(value: string) {
     if (!["128", "192", "320"].includes(value)) return;
     qualityInput.value = value;
-    syncQualityOptions();
+    document.addEventListener("contextmenu", (event) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"], [contenteditable=""]')) return;
+    event.preventDefault();
+  });
+
+  syncQualityOptions();
     closeQualityList(false);
     qualityTrigger.focus();
   }

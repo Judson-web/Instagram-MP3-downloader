@@ -39,10 +39,38 @@
     "@context": "https://schema.org",
     "@type": "FAQPage",
     "mainEntity": [
-      {"@type":"Question","name":"Which links are supported?","acceptedAnswer":{"@type":"Answer","text":"Public Instagram Reels and video post links are supported. Private, removed, or login-gated videos may not be accessible."}},
-      {"@type":"Question","name":"Do I need to upload a video or sign in?","acceptedAnswer":{"@type":"Answer","text":"No file upload or Instagram login is required. If Instagram does not expose media directly, a third-party resolver is used to look up public media."}},
-      {"@type":"Question","name":"How are private or login-gated Reels handled?","acceptedAnswer":{"@type":"Answer","text":"When Instagram explicitly identifies a Reel as private or login-required, ReelTone shows that status. Ambiguous missing-media responses are described as no public video found."}},
-      {"@type":"Question","name":"Why did a link not convert?","acceptedAnswer":{"@type":"Answer","text":"Instagram availability and anonymous request limits can change. Check the link, wait if requests are being limited, and try again."}}
+      {
+        "@type": "Question",
+        "name": "Which links are supported?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Public Instagram Reels and video post links are supported."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Do I need to sign in?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "No. Only a public post URL is needed."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Why might a Reel be unavailable?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Private, removed, or login-gated posts cannot always be accessed. Some public posts may also be temporarily unavailable."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How long is a download available?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "The temporary browser download expires after 10 minutes. A saved copy on your device is not removed."
+        }
+      }
     ]
   }
   </script>
@@ -71,12 +99,11 @@
       <div class="hero-copy">
         <div class="eyebrow"><span class="eyebrow-dot"></span> INSTAGRAM REEL TO MP3</div>
         <h1 id="hero-title">Keep the sound.<br><span>Lose the scroll.</span></h1>
-        <p class="hero-subtitle">Paste a public Reel link, choose your bitrate, and download the audio. No sign-in or software to install.</p>
+        <p class="hero-subtitle">Convert a public Instagram Reel to MP3 in a few steps. No account needed.</p>
 
-        <div class="trust-row" aria-label="Service features">
-          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>No account required</span>
+        <div class="trust-row" aria-label="Converter details">
           <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>128 / 192 / 320 kbps</span>
-          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>MP3 file</span>
+          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>10-minute downloads</span>
         </div>
       </div>
 
@@ -85,12 +112,7 @@
           <div class="card-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </div>
-          <div>
-            <h2 id="converter-title">Reel to MP3</h2>
-            <p>Paste a public link to get started.</p>
-          </div>
-          <span class="online-status"><span></span> NO SIGN-IN</span>
-        </div>
+          <h2 id="converter-title">Convert a Reel</h2>
 
         <form id="convert-form" novalidate>
           <label class="field-label" for="reel-url">INSTAGRAM URL</label>
@@ -99,7 +121,7 @@
             <input id="reel-url" name="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://www.instagram.com/reel/..." aria-describedby="url-hint" maxlength="2048" required>
             <button class="paste-button" id="paste-button" type="button">Paste</button>
           </div>
-          <p class="field-hint" id="url-hint">Public Reels and video post links are supported.</p>
+          <p class="field-hint" id="url-hint">Paste a public Reel or video post URL.</p>
 
           <div class="quality-row">
             <div class="quality-copy">
@@ -113,9 +135,9 @@
                 <svg class="quality-chevron" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m5 7.5 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
               <div class="quality-options" id="quality-options" role="listbox" aria-labelledby="quality-label" hidden>
-                <button class="quality-option" type="button" role="option" data-quality="128" aria-selected="false" tabindex="-1"><span><strong>128 kbps</strong><small>Smaller file size</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-                <button class="quality-option" type="button" role="option" data-quality="192" aria-selected="true" tabindex="-1"><span><strong>192 kbps</strong><small>Balanced audio quality</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-                <button class="quality-option" type="button" role="option" data-quality="320" aria-selected="false" tabindex="-1"><span><strong>320 kbps</strong><small>Higher bitrate, larger file</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
+                <button class="quality-option" type="button" role="option" data-quality="128" aria-selected="false" tabindex="-1"><span>128 kbps</span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
+                <button class="quality-option" type="button" role="option" data-quality="192" aria-selected="true" tabindex="-1"><span>192 kbps</span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
+                <button class="quality-option" type="button" role="option" data-quality="320" aria-selected="false" tabindex="-1"><span>320 kbps</span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
               </div>
             </div>
             <span class="visually-hidden" id="quality-status" role="status" aria-live="polite"></span>
@@ -125,7 +147,6 @@
             <span class="button-label">Convert to MP3</span>
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-          <p class="secure-note"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.5 16 5v4.2c0 4-2.5 6.6-6 8.3-3.5-1.7-6-4.3-6-8.3V5l6-2.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="m7.3 9.8 1.7 1.7 3.6-3.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg> No Instagram sign-in. Temporary downloads expire after 10 minutes.</p>
         </form>
 
         <section class="progress-panel" id="progress-panel" hidden aria-live="polite" aria-atomic="true">
@@ -133,7 +154,7 @@
             <div class="progress-spinner" id="progress-spinner" aria-hidden="true"></div>
             <div class="progress-text">
               <strong id="progress-title">Preparing your audio…</strong>
-              <span id="progress-subtitle">This usually takes a little moment.</span>
+              <span id="progress-subtitle">Getting the audio ready.</span>
             </div>
             <span class="progress-percent" id="progress-percent">3%</span>
           </div>
@@ -152,7 +173,6 @@
           </div>
           <div class="result-heading">
             <h3>Your MP3 is ready</h3>
-            <p>Your audio is ready. Download it before the link expires.</p>
           </div>
           <div class="result-file">
             <div class="file-art" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
@@ -169,29 +189,16 @@
 
         <section class="error-panel" id="error-panel" hidden role="alert">
           <div class="error-icon" aria-hidden="true">!</div>
-          <div class="error-copy"><span class="error-category" id="error-category">CONVERSION ISSUE</span><strong id="error-title">We couldn't convert that link.</strong><p id="error-message">Double-check the URL and try again.</p></div>
+          <div class="error-copy"><span class="error-category visually-hidden" id="error-category">CONVERSION ISSUE</span><strong id="error-title">We couldn't convert that link.</strong><p id="error-message">Double-check the URL and try again.</p></div>
           <button class="text-button" id="retry-button" type="button">Try again</button>
         </section>
       </section>
 
-      <aside class="visual-card" aria-label="Download details">
-        <div class="visual-card-head">
-          <span class="visual-label">DESIGNED FOR QUICK DOWNLOADS</span>
-          <span class="visual-index">01 / 03</span>
-        </div>
-        <h2>Audio, without the extra steps.</h2>
-        <p>A focused tool for publicly accessible links, with the important details up front.</p>
-        <div class="visual-detail-list">
-          <div class="visual-detail"><span class="detail-icon">01</span><span><strong>No account connection</strong><small>ReelTone never asks for your Instagram password.</small></span></div>
-          <div class="visual-detail"><span class="detail-icon">02</span><span><strong>Temporary download link</strong><small>Your browser download expires after 10 minutes.</small></span></div>
-          <div class="visual-detail"><span class="detail-icon">03</span><span><strong>Three bitrate options</strong><small>Choose 128, 192 or 320 kbps before converting.</small></span></div>
-        </div>
-      </aside>
-    </section>
+      </section>
 
     <section class="steps-section" id="how-it-works" aria-labelledby="steps-title">
       <div class="section-kicker">HOW IT WORKS</div>
-      <h2 id="steps-title">Three steps. That’s it.</h2>
+      <h2 id="steps-title">From link to MP3</h2>
       <div class="steps-grid">
         <article class="step-item">
           <div class="step-number">01</div>
@@ -225,16 +232,16 @@
           <p>Public Instagram Reels and video post links are supported. Private, removed, or login-gated videos may not be accessible.</p>
         </details>
         <details>
-          <summary>Do I need to upload a video or sign in?<span aria-hidden="true">+</span></summary>
-          <p>No file upload or Instagram login is required. ReelTone fetches audio through its own Vercel conversion function. If Instagram doesn't expose media directly, the public Reel URL is sent to a third-party link resolver to obtain the public media URL. Never enter your Instagram password here.</p>
+          <summary>Do I need to sign in?<span aria-hidden="true">+</span></summary>
+          <p>No. Only a public post URL is needed. Never share your account password with a conversion website.</p>
         </details>
         <details>
-          <summary>How are private or login-gated Reels handled?<span aria-hidden="true">+</span></summary>
-          <p>When Instagram explicitly identifies a Reel as private or login-required, ReelTone shows that specific status. Sometimes Instagram only returns “no media”; in that case the app says no public video was found instead of guessing whether the post is private, removed, or temporarily restricted.</p>
+          <summary>Why might a Reel be unavailable?<span aria-hidden="true">+</span></summary>
+          <p>Private, removed, or login-gated posts cannot always be accessed. Some public posts may also be temporarily unavailable.</p>
         </details>
         <details>
-          <summary>Why didn't a link convert?<span aria-hidden="true">+</span></summary>
-          <p>Instagram availability and anonymous request limits can change. Check the link, wait a few minutes if the source is rate-limiting requests, and try again. Repeated retries won't make private or login-gated media public.</p>
+          <summary>How long is a download available?<span aria-hidden="true">+</span></summary>
+          <p>The temporary download in your browser expires after 10 minutes. A copy you already saved to your device is not removed.</p>
         </details>
       </div>
     </section>
@@ -242,8 +249,7 @@
 
   <footer class="site-footer">
     <a class="brand footer-brand" href="/" aria-label="ReelTone home"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M4 17h4l3-8 5 16 4-13 3 5h5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>reel<span class="brand-accent">tone</span></span></a>
-    <p>A simple tool for publicly accessible audio.</p>
-    <p class="footer-note">Only download audio you have permission to use.</p>
+    <p>Download only audio you have permission to use.</p>
   </footer>
 </body>
 </html>

@@ -468,3 +468,40 @@ h1 span { color: var(--accent); }
 }
 
 :root[data-theme="dark"] .brand-mark { color: var(--bg); }
+
+/* Compact controls and a separate desktop composition */
+@media (min-width: 1200px) {
+  main, .site-footer, .site-header { width: min(1240px, calc(100% - 72px)); }
+  .hero { grid-template-columns: minmax(0, .92fr) minmax(490px, 1.08fr); column-gap: clamp(52px, 6vw, 100px); padding: 92px 0 104px; align-items: center; }
+  .hero-copy { grid-column: 1; grid-row: 1; align-self: center; padding-top: 0; }
+  .converter-card { grid-column: 2; grid-row: 1; align-self: center; padding: 32px; border-radius: 22px; }
+  h1 { font-size: clamp(62px, 5.1vw, 76px); letter-spacing: -4.2px; }
+  .hero-subtitle { max-width: 490px; font-size: 16px; }
+  .trust-row { margin-top: 28px; gap: 14px 22px; font-size: 12px; }
+  .url-input-wrap { height: 58px; }
+  .convert-button { min-height: 54px; }
+  .steps-section { padding: 68px 0 76px; }
+  .steps-grid { gap: 20px; }
+  .step-item { min-height: 178px; padding: 24px; }
+  .faq-section { gap: 78px; padding: 68px 0 80px; }
+}
+@media (min-width: 921px) and (max-width: 1199px) {
+  .hero { grid-template-columns: minmax(0, 1fr) minmax(390px, .98fr); column-gap: 36px; padding-top: 64px; }
+  .hero-copy { align-self: center; }
+  .converter-card { grid-column: 2; grid-row: 1; }
+}
+.quality-select { min-width: 132px; }
+.quality-trigger { min-width: 132px; min-height: 38px; gap: 10px; padding: 8px 10px; border-radius: 9px; font-size: 12px; font-weight: 680; }
+.quality-options { width: min(200px, calc(100vw - 48px)); padding: 4px; border-radius: 11px; box-shadow: 0 10px 26px rgba(24,25,20,.14); max-height: min(180px, 32vh); }
+.quality-option { min-height: 38px; padding: 8px 10px; border-radius: 7px; font-size: 12px; font-weight: 650; }
+.quality-option > span:first-child { display: block; }
+.quality-option-mark { font-size: 14px; }
+@media (max-width: 560px) {
+  .quality-select, .quality-trigger { min-width: 118px; }
+  .quality-trigger { min-height: 40px; }
+  .quality-options { width: min(188px, calc(100vw - 48px)); max-height: min(160px, 30vh); }
+  .quality-option { min-height: 36px; padding: 7px 9px; }
+}
+/* Disable drag-selection on the general interface; editable fields stay selectable. */
+body, body * { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+input, textarea, [contenteditable="true"], [contenteditable=""] { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default; }
