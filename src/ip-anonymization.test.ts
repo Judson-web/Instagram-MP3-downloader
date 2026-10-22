@@ -1,5 +1,5 @@
-import test = require("node:test");
-import assert = require("node:assert/strict");
+import { test } from "node:test";
+import assert from "node:assert/strict";
 import { maskClientIp } from "./ip-anonymization";
 
 test("IPv4 addresses are truncated to /24", () => {
