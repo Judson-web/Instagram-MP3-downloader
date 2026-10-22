@@ -10,14 +10,12 @@
     "rootDir": "src",
     "outDir": "dist",
     "strict": true,
-    "useUnknownInCatchVariables": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "types": [
       "node"
-    ],
-    "strictNullChecks": false
+    ]
   },
   "include": [
     "src/**/*.ts"
