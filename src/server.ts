@@ -112,7 +112,7 @@ function sendApiError(res: Response, status: number, payload: ApiErrorPayload): 
 
 function classifyConversionFailure(evidence: string, timedOut = false): { status: number; payload: ApiErrorPayload } {
   const message = String(evidence || "").toLowerCase();
-  if (timedOut || /(?:timeout|timed out|process.*(?:killed|timeout))/.test(message)) {
+  if (timedOut || /(?:conversion[-_ ]timeout|ffmpeg timeout|yt[-_ ]?dlp timeout|process.*(?:killed|timeout))/.test(message)) {
     return { status: 504, payload: { code: "CONVERSION_TIMEOUT", title: "That conversion took too long", error: "Instagram or the media source did not respond in time. Try again later, or try a different public Reel.", retryable: true, category: "conversion" } };
   }
   if (/(?:^|[\\s:_-])private(?:$|[\\s,.:_-])|private account|private reel|only the owner|media is private|is_private/.test(message)) {
@@ -1099,24 +1099,50 @@ async function tryCobaltToMp3(
     const cobaltBitrate: "128" | "256" | "320" =
       quality === "128" ? "128" : quality === "320" ? "320" : "256";
 
-    const apiResponse = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": "Api-Key " + apiKey
-      },
-      body: JSON.stringify({
-        url: sourceUrl,
-        downloadMode: "audio",
-        audioFormat: "mp3",
-        audioBitrate: cobaltBitrate,
-        filenameStyle: "basic",
-        alwaysProxy: true,
-        localProcessing: "disabled"
-      }),
-      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(12000)])
-    });
+    let apiResponse: globalThis.Response | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        apiResponse = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": "Api-Key " + apiKey
+          },
+          body: JSON.stringify({
+            url: sourceUrl,
+            downloadMode: "audio",
+            audioFormat: "mp3",
+            audioBitrate: cobaltBitrate,
+            filenameStyle: "basic",
+            alwaysProxy: true,
+            localProcessing: "disabled"
+          }),
+          // A dedicated API may be waking from idle. Allow it time to start,
+          // then make one bounded retry rather than failing the whole conversion.
+          signal: AbortSignal.any([parentSignal, AbortSignal.timeout(28000)])
+        });
+      } catch (error) {
+        if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+        if (attempt === 0 && /timeout/i.test(errorName(error))) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+          continue;
+        }
+        throw error;
+      }
+
+      if (apiResponse.status === 503 && attempt === 0) {
+        const retryAfter = parseRetryAfterSeconds(apiResponse.headers.get("retry-after"));
+        await apiResponse.body?.cancel().catch(() => {});
+        const delayMs = Math.min(5000, Math.max(1000, (retryAfter || 5) * 1000));
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        apiResponse = null;
+        continue;
+      }
+      break;
+    }
+
+    if (!apiResponse) return { ok: false, reason: "cobalt-unavailable", diagnostic: "cobalt-no-response" };
 
     if (apiResponse.status === 429) {
       await apiResponse.body?.cancel().catch(() => {});
