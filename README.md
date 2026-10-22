@@ -2,15 +2,15 @@
 
 A focused web app for converting publicly accessible Instagram Reels and video posts into MP3 audio.
 
-[![Website](https://img.shields.io/website?url=https%3A%2F%2Finstagram-mp3-downloader.vercel.app&label=website)](https://instagram-mp3-downloader.vercel.app/)
-[![Service health](https://img.shields.io/endpoint?url=https%3A%2F%2Finstagram-mp3-downloader.vercel.app%2Fapi%2Fhealth%2Fbadge)](https://instagram-mp3-downloader.vercel.app/api/health)
+[![Website](https://img.shields.io/website?url=https%3A%2F%2Finstagramreeltomp3converter.vercel.app&label=website)](https://instagramreeltomp3converter.vercel.app/)
+[![Service health](https://img.shields.io/endpoint?url=https%3A%2F%2Finstagramreeltomp3converter.vercel.app%2Fapi%2Fhealth%2Fbadge)](https://instagramreeltomp3converter.vercel.app/api/health)
 [![CI](https://github.com/Judson-web/Instagram-MP3-downloader/actions/workflows/ci.yml/badge.svg)](https://github.com/Judson-web/Instagram-MP3-downloader/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/github/license/Judson-web/Instagram-MP3-downloader)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/source-TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node.js 22](https://img.shields.io/badge/Node.js-22-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![Vercel](https://img.shields.io/badge/hosted%20on-Vercel-black?logo=vercel&logoColor=white)](https://vercel.com/)
 
-**Live site:** https://instagram-mp3-downloader.vercel.app/
+**Live site:** https://instagramreeltomp3converter.vercel.app/
 
 ## Features
 
@@ -56,8 +56,8 @@ The current source cooldown table is defined in [`migrations/001-source-cooldown
 ## Health and API
 
 - **Social previews:** Open Graph and Twitter/X metadata use the branded generated `public/og-card.png` image (source artwork: `public/og-card.svg`).
-- **Application/database health:** [`/api/health`](https://instagram-mp3-downloader.vercel.app/api/health).
-- **Badge data:** [`/api/health/badge`](https://instagram-mp3-downloader.vercel.app/api/health/badge).
+- **Application/database health:** [`/api/health`](https://instagramreeltomp3converter.vercel.app/api/health).
+- **Badge data:** [`/api/health/badge`](https://instagramreeltomp3converter.vercel.app/api/health/badge).
 - **Build workflow:** [GitHub Actions](https://github.com/Judson-web/Instagram-MP3-downloader/actions/workflows/ci.yml).
 
 The service health check confirms the app can connect to its database. It does not guarantee that the upstream social-media source is available.
