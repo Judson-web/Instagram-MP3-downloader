@@ -7,3 +7,4 @@ public/app.js
 .env.*
 !.env.example
 public/og-card.png
+ip-anonymization.js
