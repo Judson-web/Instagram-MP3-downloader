@@ -465,3 +465,5 @@ h1 span { color: var(--accent); }
   .theme-toggle span { display:none; }
   .theme-toggle { width:36px; min-width:36px; padding:7px; }
 }
+
+:root[data-theme="dark"] .brand-mark { color: var(--bg); }
