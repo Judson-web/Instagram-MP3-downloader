@@ -1085,19 +1085,23 @@ app.post("/api/convert", async (req, res) => {
     }
   };
 
+  let providerFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicResolver: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let extractorError: any = null;
 
   try {
-    const providerFallback = await tryEasyDownToMp3(
-      validated.url,
-      directory,
-      outputPath,
-      quality,
-      fallbackController.signal,
-      (process) => { fallbackChild = process; }
-    );
+    const providerCooldown = await getSourceCooldownSeconds("easydown");
+    providerFallback = providerCooldown > 0
+      ? { ok: false, reason: "provider-cooldown", retryAfterSeconds: providerCooldown }
+      : await tryEasyDownToMp3(
+          validated.url,
+          directory,
+          outputPath,
+          quality,
+          fallbackController.signal,
+          (process) => { fallbackChild = process; }
+        );
 
     if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
       cleanup();
