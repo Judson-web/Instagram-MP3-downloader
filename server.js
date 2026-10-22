@@ -131,6 +131,22 @@ async function checkRateLimit(ip) {
   return Number(rows[0]?.request_count || 0) <= MAX_REQUESTS_PER_HOUR;
 }
 
+function safeExtractorDiagnostic(stderr, error) {
+  const combined = [
+    String(stderr || ""),
+    String(error?.stderr || ""),
+    String(error?.message || "")
+  ].join("\n");
+  const redacted = combined
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[url]")
+    .replace(/www\.instagram\.com\/[^\s"'<>]+/gi, "[instagram-url]")
+    .replace(/(cookie|authorization|password|token)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]");
+  const lines = redacted.split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && /(ERROR:|HTTP Error|unable to|not found|forbidden|login required|no video|no formats|ffmpeg|extractaudio|rate.?limit|429|403|traceback|failed to)/i.test(line));
+  return lines.slice(-3).join(" | ").slice(0, 500) || "no extractor diagnostic";
+}
+
 function safeConversionError(error, timedOut) {
   if (timedOut) return "This Reel took too long to process. Try a shorter Reel.";
   const message = String(error?.stderr || error?.message || "").toLowerCase();
@@ -275,7 +291,7 @@ app.post("/api/convert", async (req, res) => {
       if (!res.writableEnded) res.destroy();
       return;
     }
-    console.warn("ReelTone conversion failed:", error?.exitCode ?? error?.name ?? "unknown error");
+    console.warn("ReelTone conversion failed:", error?.exitCode ?? error?.name ?? "unknown error", "|", safeExtractorDiagnostic(stderrTail, error));
     return res.status(502).json({
       error: safeConversionError({ stderr: stderrTail + "\n" + String(error?.stderr || error?.message || "") }, timedOut)
     });
