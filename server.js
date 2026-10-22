@@ -434,6 +434,92 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
   }
 }
 
+
+async function tryEasyDownToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess) {
+  const token = process.env.EASYDOWN_API_TOKEN;
+  if (!token) return { ok: false, reason: "provider-not-configured" };
+
+  try {
+    const response = await fetch("https://api.easydown.org/api/v1/platforms/instagram/parse", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify({ url: sourceUrl }),
+      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(15000)])
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, reason: "provider-auth-failed" };
+    }
+    if (!response.ok || !payload || Number(payload.status || response.status) >= 400) {
+      return { ok: false, reason: "provider-no-media" };
+    }
+
+    const media = payload?.data?.media || payload?.data;
+    if (!media || !Array.isArray(media.videos) && !Array.isArray(media.audios)) {
+      return { ok: false, reason: "provider-no-media" };
+    }
+
+    const duration = Number(media.duration || 0);
+    if (duration > MAX_DURATION_SECONDS) return { ok: false, reason: "duration-limit" };
+
+    const candidates = [
+      ...(Array.isArray(media.audios) ? media.audios : []),
+      ...(Array.isArray(media.videos) ? media.videos.filter((item) => item?.hasAudio !== false) : [])
+    ];
+    const chosen = candidates.find((item) => typeof item?.url === "string" && isAllowedMediaAsset(item.url));
+    if (!chosen) return { ok: false, reason: "provider-no-media" };
+
+    const downloaded = await fetchInstagramMediaAsset(chosen.url, parentSignal);
+    if (!downloaded.ok) return downloaded;
+    if (downloaded.contentLength > MAX_SOURCE_BYTES) {
+      await downloaded.response.body?.cancel().catch(() => {});
+      return { ok: false, reason: "media-too-large" };
+    }
+
+    const inputPath = path.join(directory, "provider-source.bin");
+    let totalBytes = 0;
+    const limiter = new Transform({
+      transform(chunk, _encoding, callback) {
+        totalBytes += chunk.length;
+        if (totalBytes > MAX_SOURCE_BYTES) callback(new Error("source media exceeded the size limit"));
+        else callback(null, chunk);
+      }
+    });
+
+    try {
+      await pipeline(
+        Readable.fromWeb(downloaded.response.body),
+        limiter,
+        fs.createWriteStream(inputPath, { flags: "wx" }),
+        { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
+      );
+    } catch (error) {
+      fs.rmSync(inputPath, { force: true });
+      if (error?.name === "AbortError") return { ok: false, reason: "media-download-timeout" };
+      if (/size limit/.test(String(error?.message || ""))) return { ok: false, reason: "media-too-large" };
+      return { ok: false, reason: "media-download-failed" };
+    }
+
+    await encodeDownloadedVideo(inputPath, outputPath, quality, parentSignal, setProcess);
+    return { ok: true, reason: "easydown" };
+  } catch (error) {
+    if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+    return {
+      ok: false,
+      reason: "provider-request-failed",
+      diagnostic: safeExtractorDiagnostic(String(error?.message || ""), null)
+    };
+  } finally {
+    fs.rm(path.join(directory, "provider-source.bin"), { force: true }, () => {});
+  }
+}
+
+
 app.get("/api/health", (_req, res) => {
   res.set("Cache-Control", "no-store");
   res.json({ ok: true, service: "reeltone", maxDurationSeconds: MAX_DURATION_SECONDS });
@@ -513,8 +599,37 @@ app.post("/api/convert", async (req, res) => {
   let extractorError = null;
 
   try {
-    // First use the public Reel HTML when it contains a direct, publicly served
-    // MP4 URL. This avoids depending solely on yt-dlp's Instagram extractor.
+    const providerFallback = await tryEasyDownToMp3(
+      validated.url,
+      directory,
+      outputPath,
+      quality,
+      fallbackController.signal,
+      (process) => { fallbackChild = process; }
+    );
+
+    if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
+      cleanup();
+      return;
+    }
+    if (providerFallback.ok && fs.existsSync(outputPath)) {
+      await streamResult();
+      return;
+    }
+    if (providerFallback.reason === "duration-limit") {
+      cleanup();
+      return res.status(413).json({ error: "This Reel exceeds the 20-minute processing limit." });
+    }
+    if (providerFallback.reason === "media-too-large") {
+      cleanup();
+      return res.status(413).json({ error: "This video file is too large for the online converter." });
+    }
+    if (process.env.EASYDOWN_API_TOKEN && providerFallback.reason !== "provider-no-media") {
+      console.warn("ReelTone provider fallback failed:", String(providerFallback.reason || "unknown").slice(0, 80));
+    }
+
+    // Next use public Reel HTML when it exposes a CDN media URL.
+    // This avoids depending solely on yt-dlp's Instagram extractor.
     publicFallback = await tryPublicHtmlToMp3(
       validated.url,
       directory,
