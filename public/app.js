@@ -30,10 +30,12 @@
   const regularPostPath = /^\/(?:reel|reels|p|tv)\/[A-Za-z0-9_-]+\/?$/i;
   const sharedPostPath = /^\/share\/reel\/[A-Za-z0-9_-]+\/?$/i;
 
-  let currentJobId = null;
-  let pollTimer = null;
-  let networkFailures = 0;
   let busy = false;
+  let abortController = null;
+  let progressTimer = null;
+  let progressStartedAt = 0;
+  let audioObjectUrl = null;
+  let cancelRequested = false;
 
   function show(element, visible) {
     element.hidden = !visible;
@@ -45,11 +47,8 @@
     qualityInput.disabled = value;
     pasteButton.disabled = value;
     convertButton.disabled = value;
+    cancelButton.disabled = !value;
     convertButton.querySelector(".button-label").textContent = value ? "Converting…" : "Convert to MP3";
-    if (value) {
-      inputWrap.classList.remove("invalid");
-      urlInput.removeAttribute("aria-invalid");
-    }
   }
 
   function validateUrl(value) {
@@ -72,6 +71,18 @@
     show(errorPanel, false);
   }
 
+  function stopProgress() {
+    if (progressTimer) window.clearInterval(progressTimer);
+    progressTimer = null;
+    progressTrack.classList.remove("is-indeterminate");
+    progressSpinner.style.display = "";
+  }
+
+  function revokeAudioUrl() {
+    if (audioObjectUrl) URL.revokeObjectURL(audioObjectUrl);
+    audioObjectUrl = null;
+  }
+
   function showInputError(message) {
     inputWrap.classList.add("invalid");
     urlInput.setAttribute("aria-invalid", "true");
@@ -86,92 +97,89 @@
   }
 
   function showError(title, message) {
-    stopPolling();
+    stopProgress();
     show(progressPanel, false);
     show(resultPanel, false);
     show(errorPanel, true);
     errorTitle.textContent = title || "We couldn't convert that link.";
     errorMessage.textContent = message || "Double-check the URL and try again.";
-    progressSpinner.style.display = "";
     setBusy(false);
   }
 
-  function stopPolling() {
-    if (pollTimer) window.clearTimeout(pollTimer);
-    pollTimer = null;
+  function paintConvertingState() {
+    const elapsed = (Date.now() - progressStartedAt) / 1000;
+    let title = "Fetching your Reel…";
+    let subtitle = "Connecting to the public video and preparing audio.";
+    let step = "Fetching the Reel";
+
+    if (elapsed >= 8) {
+      title = "Extracting the soundtrack…";
+      subtitle = "This can take a moment. Keep this tab open.";
+      step = "Extracting audio";
+    }
+    if (elapsed >= 22) {
+      title = "Finishing your MP3…";
+      subtitle = "Encoding the audio at " + qualityInput.value + " kbps.";
+      step = "Encoding MP3";
+    }
+    progressTitle.textContent = title;
+    progressSubtitle.textContent = subtitle;
+    progressStep.textContent = step;
+    progressPercent.textContent = elapsed < 1 ? "START" : "WORKING";
+    progressTrack.setAttribute("aria-valuetext", "Conversion in progress");
   }
 
-  function paintProgress(job) {
-    const progress = Math.max(0, Math.min(100, Number(job.progress) || 0));
-    progressPercent.textContent = progress + "%";
-    progressFill.style.width = progress + "%";
-    progressTrack.setAttribute("aria-valuenow", String(progress));
-    progressTitle.textContent = job.message || "Working on your MP3…";
-    progressSubtitle.textContent = job.status === "converting"
-      ? "Finishing the audio at your chosen quality."
-      : "Keep this tab open while your MP3 is prepared.";
-    progressStep.textContent = job.status === "converting" ? "Encoding MP3" : "Fetching the Reel";
+  function startProgress() {
+    progressStartedAt = Date.now();
+    show(progressPanel, true);
+    progressTrack.classList.add("is-indeterminate");
+    progressFill.style.width = "";
+    progressTitle.textContent = "Getting things ready…";
+    progressSubtitle.textContent = "Connecting to the converter.";
+    progressPercent.textContent = "START";
+    progressTrack.removeAttribute("aria-valuenow");
+    progressStep.textContent = "Fetching the Reel";
+    progressSpinner.style.display = "";
+    cancelRequested = false;
+    progressTimer = window.setInterval(paintConvertingState, 900);
+    paintConvertingState();
   }
 
-  function finishSuccess() {
-    stopPolling();
+  function finishSuccess(blob) {
+    stopProgress();
+    revokeAudioUrl();
+    audioObjectUrl = URL.createObjectURL(blob);
     show(progressPanel, false);
     show(errorPanel, false);
     show(resultPanel, true);
     form.hidden = true;
-    resultQuality.textContent = "MP3 · " + qualityInput.value + " kbps";
-    progressSpinner.style.display = "";
+    resultQuality.textContent = "MP3 · " + qualityInput.value + " kbps · " + formatBytes(blob.size);
     setBusy(false);
   }
 
-  async function pollJob() {
-    if (!currentJobId) return;
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return "Audio file";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  async function readError(response) {
+    const text = await response.text().catch(() => "");
     try {
-      const response = await fetch("/api/jobs/" + encodeURIComponent(currentJobId), {
-        cache: "no-store",
-        headers: { Accept: "application/json" }
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        currentJobId = null;
-        showError("Conversion expired", data.error || "The conversion couldn't be found. Try again.");
-        return;
-      }
-
-      networkFailures = 0;
-      paintProgress(data);
-
-      if (data.status === "completed") {
-        finishSuccess();
-        return;
-      }
-      if (data.status === "failed") {
-        showError("That Reel couldn't be converted", data.error || "Try another public Reel link.");
-        return;
-      }
-      if (data.status === "cancelled") {
-        currentJobId = null;
-        show(progressPanel, false);
-        setBusy(false);
-        return;
-      }
-      pollTimer = window.setTimeout(pollJob, 1400);
+      const data = JSON.parse(text);
+      return data.error || "The conversion couldn't be completed.";
     } catch {
-      networkFailures += 1;
-      if (networkFailures >= 5) {
-        showError("Connection interrupted", "We lost contact with the converter. Check your connection and try the link again.");
-        return;
-      }
-      progressSubtitle.textContent = "Reconnecting to the converter…";
-      pollTimer = window.setTimeout(pollJob, 2000);
+      return "The conversion service returned an unexpected response. Please try again.";
     }
   }
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (busy) return;
+
     clearPanels();
     clearInputError();
+    revokeAudioUrl();
 
     const url = urlInput.value.trim();
     if (!url) {
@@ -184,35 +192,48 @@
     }
 
     setBusy(true);
-    show(progressPanel, true);
-    progressTitle.textContent = "Getting things ready…";
-    progressSubtitle.textContent = "Connecting to the converter.";
-    progressPercent.textContent = "3%";
-    progressFill.style.width = "3%";
-    progressTrack.setAttribute("aria-valuenow", "3");
-    progressStep.textContent = "Fetching the Reel";
-    cancelButton.disabled = false;
-    networkFailures = 0;
+    abortController = new AbortController();
+    startProgress();
 
     try {
       const response = await fetch("/api/convert", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ url, quality: qualityInput.value })
+        headers: { "Content-Type": "application/json", Accept: "audio/mpeg, application/json" },
+        body: JSON.stringify({ url, quality: qualityInput.value }),
+        signal: abortController.signal
       });
-      const data = await response.json().catch(() => ({}));
+
       if (!response.ok) {
-        show(progressPanel, false);
-        setBusy(false);
-        showError("Ready for another try", data.error || "The converter couldn't start. Please try again.");
+        const message = await readError(response);
+        showError("That Reel couldn't be converted", message);
         return;
       }
-      currentJobId = data.jobId;
-      pollJob();
-    } catch {
-      show(progressPanel, false);
-      setBusy(false);
+
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!contentType.includes("audio/")) {
+        const message = await readError(response);
+        showError("Unexpected conversion response", message);
+        return;
+      }
+
+      const blob = await response.blob();
+      if (!blob.size) {
+        showError("The MP3 was empty", "Try another public Reel link.");
+        return;
+      }
+      finishSuccess(blob);
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        if (cancelRequested) {
+          showError("Conversion cancelled", "No problem. Paste a Reel link whenever you're ready.");
+        }
+        return;
+      }
       showError("Couldn't reach the converter", "Check your connection and try again in a moment.");
+    } finally {
+      abortController = null;
+      stopProgress();
+      if (!busy || cancelRequested) setBusy(false);
     }
   });
 
@@ -237,45 +258,33 @@
 
   urlInput.addEventListener("input", clearInputError);
 
-  cancelButton.addEventListener("click", async () => {
-    stopPolling();
-    const id = currentJobId;
-    currentJobId = null;
-    cancelButton.disabled = true;
-    if (id) {
-      try {
-        await fetch("/api/jobs/" + encodeURIComponent(id), { method: "DELETE" });
-      } catch {
-        // The UI still returns to its idle state if the connection drops.
-      }
-    }
-    show(progressPanel, false);
-    setBusy(false);
-    cancelButton.disabled = false;
-    showError("Conversion cancelled", "No problem. Paste a Reel link whenever you're ready.");
-    urlInput.focus();
+  cancelButton.addEventListener("click", () => {
+    if (!busy || !abortController) return;
+    cancelRequested = true;
+    stopProgress();
+    abortController.abort();
   });
 
   downloadButton.addEventListener("click", () => {
-    if (!currentJobId) {
-      showError("This MP3 has expired", "Run the conversion again to create a fresh download.");
+    if (!audioObjectUrl) {
+      showError("This MP3 is no longer available", "Convert the Reel again to create a fresh download.");
       return;
     }
-    const originalText = downloadButton.lastChild;
-    downloadButton.disabled = true;
-    downloadButton.setAttribute("aria-busy", "true");
-    window.location.assign("/api/jobs/" + encodeURIComponent(currentJobId) + "/download");
-    downloadButton.querySelector("svg");
-    window.setTimeout(() => {
-      downloadButton.disabled = false;
-      downloadButton.removeAttribute("aria-busy");
-      if (originalText && originalText.nodeType === Node.TEXT_NODE) originalText.textContent = "Download MP3";
-    }, 1800);
+    const anchor = document.createElement("a");
+    anchor.href = audioObjectUrl;
+    anchor.download = "reeltone.mp3";
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
   });
 
   function resetForAnother() {
-    stopPolling();
-    currentJobId = null;
+    stopProgress();
+    revokeAudioUrl();
+    abortController?.abort();
+    abortController = null;
+    cancelRequested = false;
     form.hidden = false;
     form.reset();
     qualityInput.value = "192";
@@ -292,8 +301,8 @@
     urlInput.focus();
   });
 
-  // Ensure service health failures never leave the button disabled.
+  window.addEventListener("pagehide", revokeAudioUrl);
   window.addEventListener("pageshow", () => {
-    if (!currentJobId) setBusy(false);
+    if (!abortController) setBusy(false);
   });
 })();
