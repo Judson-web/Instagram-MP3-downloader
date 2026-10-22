@@ -491,7 +491,7 @@ async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality,
     if (duration > MAX_DURATION_SECONDS) return { ok: false, reason: "duration-limit" };
 
     const media = await fetchInstagramMediaAsset(selected.url, parentSignal);
-    if (!media.ok) return { ok: false, reason: media.reason || "media-not-public" };
+    if ("reason" in media) return { ok: false, reason: media.reason || "media-not-public" };
     if (media.contentLength > MAX_SOURCE_BYTES) {
       await media.response.body?.cancel().catch(() => {});
       return { ok: false, reason: "media-too-large" };
@@ -714,7 +714,7 @@ async function tryEasyDownToMp3(sourceUrl, directory, outputPath, quality, paren
     if (!chosen) return { ok: false, reason: "provider-no-media" };
 
     const downloaded = await fetchInstagramMediaAsset(chosen.url, parentSignal);
-    if (!downloaded.ok) return { ok: false, reason: downloaded.reason || "media-not-public" };
+    if ("reason" in downloaded) return { ok: false, reason: downloaded.reason || "media-not-public" };
     if (downloaded.contentLength > MAX_SOURCE_BYTES) {
       await downloaded.response.body?.cancel().catch(() => {});
       return { ok: false, reason: "media-too-large" };
