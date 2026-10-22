@@ -15,13 +15,13 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 ## Features
 
 - Convert publicly accessible Reel and video-post URLs into MP3.
-- Choose 128, 192, or 320 kbps.
-- Custom compact bitrate picker with keyboard navigation.
+- Choose 128, 192, 256, or 320 kbps.
+- Compact, keyboard-accessible bitrate picker with four presets and concise quality labels.
 - Light and dark themes with a remembered preference.
 - Temporary browser download that expires after ten minutes.
 - Clear, specific messages for invalid or unavailable links.
 - Responsive desktop and mobile layouts.
-- Search metadata, social sharing metadata, and structured data.
+- Search metadata, social sharing metadata, a branded 1200 × 630 Open Graph/Twitter preview card, and structured data.
 - Application health endpoint and live status badge.
 
 ## Technology
@@ -50,7 +50,7 @@ Keep environment files and secret values out of Git. Configure deployment variab
 
 ## Health and API
 
-- **Website availability:** measured by the website badge above.
+- **Social previews:** Open Graph and Twitter/X metadata use the branded `public/og-card.svg` image.
 - **Application/database health:** [`/api/health`](https://instagram-mp3-downloader.vercel.app/api/health).
 - **Badge data:** [`/api/health/badge`](https://instagram-mp3-downloader.vercel.app/api/health/badge).
 - **Build workflow:** [GitHub Actions](https://github.com/Judson-web/Instagram-MP3-downloader/actions/workflows/ci.yml).
@@ -59,7 +59,7 @@ The service health check confirms the app can connect to its database. It does n
 
 ## Security
 
-The deployment applies a restrictive Content Security Policy, HTTPS transport policy, anti-framing controls, MIME-sniffing protection, a restrictive Permissions Policy, and cross-origin response policies. The server also validates submitted URLs and constrains media processing.
+The deployment applies a nonce-based Content Security Policy, HSTS, anti-framing controls, MIME-sniffing protection, a restrictive Permissions Policy, and cross-origin response policies. Visitor identifiers are pseudonymized with keyed HMAC-SHA-256; the production key must contain at least 32 bytes. The server also validates submitted URLs and constrains media processing.
 
 These safeguards reduce exposure but cannot make a public website perfectly secure. Keep dependencies updated and review configuration changes before deploying.
 
