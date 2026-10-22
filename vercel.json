@@ -3,7 +3,10 @@
   "functions": {
     "server.js": {
       "maxDuration": 300,
-      "includeFiles": "**/*"
+      "includeFiles": "**/*",
+      "regions": [
+        "bom1"
+      ]
     }
   },
   "headers": [
