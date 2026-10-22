@@ -143,7 +143,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
     const categoryByCode: Record<string, string> = {
       PRIVATE_REEL: "private",
       LOGIN_REQUIRED: "private",
-      NO_PUBLIC_MEDIA: "private",
+      NO_PUBLIC_MEDIA: "unavailable",
       REEL_UNAVAILABLE: "unavailable",
       INSTAGRAM_RATE_LIMITED: "rate-limit",
       RATE_LIMITED: "rate-limit",
