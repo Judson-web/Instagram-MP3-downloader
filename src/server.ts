@@ -1,7 +1,7 @@
 "use strict";
 
 import express = require("express");
-import helmet = require("helmet");
+import helmet from "helmet";
 import fs = require("node:fs");
 import os = require("node:os");
 import path = require("node:path");
@@ -58,6 +58,9 @@ interface ConversionAttempt {
   title?: string;
   author?: string;
 }
+type MediaAssetAttempt =
+  | { ok: true; response: globalThis.Response; url: string; contentLength: number }
+  | { ok: false; reason: string };
 
 function sendApiError(res: Response, status: number, payload: ApiErrorPayload): Response {
   res.set("Cache-Control", "no-store");
@@ -330,7 +333,7 @@ function getInstagramVideoDuration(html) {
   return match ? Number(match[1]) : null;
 }
 
-async function fetchInstagramMediaAsset(rawUrl, parentSignal) {
+async function fetchInstagramMediaAsset(rawUrl, parentSignal): Promise<MediaAssetAttempt> {
   let current = rawUrl;
   for (let redirects = 0; redirects <= 3; redirects++) {
     if (!isAllowedMediaAsset(current)) {
@@ -488,7 +491,7 @@ async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality,
     if (duration > MAX_DURATION_SECONDS) return { ok: false, reason: "duration-limit" };
 
     const media = await fetchInstagramMediaAsset(selected.url, parentSignal);
-    if (!media.ok) return media;
+    if (!media.ok) return { ok: false, reason: media.reason };
     if (media.contentLength > MAX_SOURCE_BYTES) {
       await media.response.body?.cancel().catch(() => {});
       return { ok: false, reason: "media-too-large" };
@@ -505,7 +508,7 @@ async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality,
 
     try {
       await pipeline(
-        Readable.fromWeb(media.response.body),
+        Readable.fromWeb(media.response.body as any),
         limiter,
         fs.createWriteStream(inputPath, { flags: "wx" }),
         { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
@@ -711,7 +714,7 @@ async function tryEasyDownToMp3(sourceUrl, directory, outputPath, quality, paren
     if (!chosen) return { ok: false, reason: "provider-no-media" };
 
     const downloaded = await fetchInstagramMediaAsset(chosen.url, parentSignal);
-    if (!downloaded.ok) return downloaded;
+    if (!downloaded.ok) return { ok: false, reason: downloaded.reason };
     if (downloaded.contentLength > MAX_SOURCE_BYTES) {
       await downloaded.response.body?.cancel().catch(() => {});
       return { ok: false, reason: "media-too-large" };
@@ -729,7 +732,7 @@ async function tryEasyDownToMp3(sourceUrl, directory, outputPath, quality, paren
 
     try {
       await pipeline(
-        Readable.fromWeb(downloaded.response.body),
+        Readable.fromWeb(downloaded.response.body as any),
         limiter,
         fs.createWriteStream(inputPath, { flags: "wx" }),
         { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
@@ -799,6 +802,8 @@ app.post("/api/convert", async (req, res) => {
   }
 
   const outputPath = path.join(directory, "audio.mp3");
+  let audioTitle: string | undefined;
+  let audioAuthor: string | undefined;
   const cleanup = () => fs.rm(directory, { recursive: true, force: true }, () => {});
   let child = null;
   let fallbackChild = null;
