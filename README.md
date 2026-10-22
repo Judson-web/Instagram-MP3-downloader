@@ -41,12 +41,16 @@ Requirements: Node.js 22 or later and a Neon Postgres database.
 1. Clone this repository.
 2. Install dependencies with `npm install`.
 3. Set `DATABASE_URL` to your Neon connection string.
-4. Set `RATE_LIMIT_SECRET` to a strong random value.
+4. Set `RATE_LIMIT_SECRET` to a cryptographically random value of at least 32 bytes.
 5. Run `npm run check` to type-check the application.
 6. Run `npm run build` to compile the TypeScript runtime files.
 7. Run `npm start` and open http://localhost:3000.
 
 Keep environment files and secret values out of Git. Configure deployment variables through the hosting provider's environment settings.
+
+## Database schema
+
+The current source cooldown table is defined in [`migrations/001-source-cooldowns.sql`](migrations/001-source-cooldowns.sql). Apply the migration when setting up a fresh Neon database.
 
 ## Health and API
 
@@ -59,7 +63,9 @@ The service health check confirms the app can connect to its database. It does n
 
 ## Security
 
-The deployment applies a nonce-based Content Security Policy, HSTS, anti-framing controls, MIME-sniffing protection, a restrictive Permissions Policy, and cross-origin response policies. Visitor identifiers are pseudonymized with keyed HMAC-SHA-256; the production key must contain at least 32 bytes. The server also validates submitted URLs and constrains media processing.
+The deployment applies a nonce-based Content Security Policy, HSTS, anti-framing controls, MIME-sniffing protection, a restrictive Permissions Policy, and cross-origin response policies. Visitor rate-limit identifiers are truncated to an IPv4 `/24` or IPv6 `/64` network prefix, then pseudonymized using keyed HMAC-SHA-256 with a production secret of at least 32 bytes. Raw client IPs and truncated network prefixes are not stored as rate-limit keys.
+
+The `reeltone_source_cooldowns` table keeps upstream rate-limit cooldowns shared across Vercel instances. When a source returns a 429, ReelTone honors `Retry-After` when available, otherwise applies an escalating cooldown, sends a `Retry-After` response header, and disables repeated user retries until the cooldown expires. This reduces needless requests; it does not bypass limits enforced by Instagram or a media provider. The server also validates submitted URLs and constrains media processing.
 
 These safeguards reduce exposure but cannot make a public website perfectly secure. Keep dependencies updated and review configuration changes before deploying.
 
