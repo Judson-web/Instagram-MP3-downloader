@@ -94,8 +94,10 @@ const byId = <T extends HTMLElement>(id: string): T => {
   function openQualityList(focusSelected = true) {
     if (busy) return;
     const pickerBounds = qualityPicker.getBoundingClientRect();
+    const spaceAbove = pickerBounds.top;
     const spaceBelow = window.innerHeight - pickerBounds.bottom;
-    qualityPicker.classList.toggle("opens-up", spaceBelow < 240 && pickerBounds.top > spaceBelow);
+    const minimumMenuSpace = Math.min(160, window.innerHeight * 0.3);
+    qualityPicker.classList.toggle("opens-up", spaceAbove >= minimumMenuSpace || spaceAbove >= spaceBelow);
     qualityOptions.hidden = false;
     qualityTrigger.setAttribute("aria-expanded", "true");
     qualityPicker.classList.add("is-open");
@@ -106,13 +108,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
   function chooseQuality(value: string) {
     if (!["128", "192", "320"].includes(value)) return;
     qualityInput.value = value;
-    document.addEventListener("contextmenu", (event) => {
-    const target = event.target;
-    if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"], [contenteditable=""]')) return;
-    event.preventDefault();
-  });
-
-  syncQualityOptions();
+    syncQualityOptions();
     closeQualityList(false);
     qualityTrigger.focus();
   }
@@ -426,6 +422,12 @@ const byId = <T extends HTMLElement>(id: string): T => {
       stopProgress();
       if (!busy || cancelRequested) setBusy(false);
     }
+  });
+
+  document.addEventListener("contextmenu", (event) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"], [contenteditable=""]')) return;
+    event.preventDefault();
   });
 
   syncQualityOptions();
