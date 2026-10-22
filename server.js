@@ -389,10 +389,12 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
     let selected = null;
     let duration = null;
     let lastReason = "no-public-video-metadata";
+    const pageDiagnostics = [];
 
     // The embed route can expose a public post's media metadata even when
     // the normal page responds with a login wall to datacenter requests.
     for (const pageUrl of pageCandidates) {
+      const pageLabel = pageUrl === pageCandidates[0] ? "embed" : "page";
       let pageResponse;
       try {
         pageResponse = await fetch(pageUrl, {
@@ -409,6 +411,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
       } catch (error) {
         if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
         lastReason = error?.name === "TimeoutError" ? "instagram-page-timeout" : "instagram-page-unavailable";
+        pageDiagnostics.push(`${pageLabel}:fetch-${error?.name || "error"}`);
         continue;
       }
 
@@ -417,6 +420,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
       if (!pageResponse.ok || !ALLOWED_HOSTS.has(finalHost)) {
         await pageResponse.body?.cancel().catch(() => {});
         lastReason = "instagram-page-unavailable";
+        pageDiagnostics.push(`${pageLabel}:http-${pageResponse.status}:${ALLOWED_HOSTS.has(finalHost) ? "ig" : "redirect"}`);
         continue;
       }
 
@@ -424,6 +428,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
       if (pageLength > 5 * 1024 * 1024) {
         await pageResponse.body?.cancel().catch(() => {});
         lastReason = "instagram-page-too-large";
+        pageDiagnostics.push(`${pageLabel}:length-header-too-large`);
         continue;
       }
 
@@ -432,10 +437,12 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
         html = await pageResponse.text();
       } catch {
         lastReason = "instagram-page-unavailable";
+        pageDiagnostics.push(`${pageLabel}:body-read-failed`);
         continue;
       }
       if (html.length > 5 * 1024 * 1024) {
         lastReason = "instagram-page-too-large";
+        pageDiagnostics.push(`${pageLabel}:html-too-large`);
         continue;
       }
 
@@ -446,6 +453,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
       }
 
       const versions = extractInstagramVideoVersions(html);
+      pageDiagnostics.push(`${pageLabel}:${pageResponse.status}:${html.length}:${/video_url/i.test(html) ? 1 : 0}:${/video_versions/i.test(html) ? 1 : 0}:${/not-logged-in|login required|log in to continue/i.test(html) ? 1 : 0}:${versions.length}`);
       if (versions.length) {
         selected = versions[0];
         break;
@@ -453,7 +461,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
       lastReason = "no-public-video-metadata";
     }
 
-    if (!selected) return { ok: false, reason: lastReason };
+    if (!selected) return { ok: false, reason: lastReason, diagnostic: pageDiagnostics.join(",").slice(0, 300) };
 
     const media = await fetchInstagramMediaAsset(selected.url, parentSignal);
     if (!media.ok) return media;
