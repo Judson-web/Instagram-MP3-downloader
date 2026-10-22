@@ -835,8 +835,8 @@ app.post("/api/convert", async (req, res) => {
       "Cache-Control": "no-store, private",
       "X-Content-Type-Options": "nosniff",
       "X-ReelTone-Quality": quality,
-      ...(audioTitle ? { "X-ReelTone-Title": encodeURIComponent(audioTitle.replace(/[\\r\\n\\u0000-\\u001f]/g, " ").slice(0, 180)) } : {}),
-      ...(audioAuthor ? { "X-ReelTone-Author": encodeURIComponent(audioAuthor.replace(/[\\r\\n\\u0000-\\u001f]/g, " ").slice(0, 80)) } : {}),
+      ...(audioTitle ? { "X-ReelTone-Title": encodeURIComponent(audioTitle.replace(/[\r\n\u0000-\u001f]/g, " ").slice(0, 180)) } : {}),
+      ...(audioAuthor ? { "X-ReelTone-Author": encodeURIComponent(audioAuthor.replace(/[\r\n\u0000-\u001f]/g, " ").slice(0, 80)) } : {}),
       "Content-Length": String(size)
     });
     try {
