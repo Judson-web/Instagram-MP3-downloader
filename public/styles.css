@@ -505,3 +505,11 @@ h1 span { color: var(--accent); }
 /* Disable drag-selection on the general interface; editable fields stay selectable. */
 body, body * { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 input, textarea, [contenteditable="true"], [contenteditable=""] { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default; }
+
+/* Prevent intrinsic grid sizing from widening small screens. */
+.hero-copy, .converter-card { min-width: 0; }
+@media (max-width: 920px) {
+  .hero { grid-template-columns: minmax(0, 1fr); }
+  .hero-copy, .converter-card { width: 100%; min-width: 0; }
+  .converter-card { grid-column: 1; grid-row: 2; }
+}
