@@ -7,7 +7,8 @@ import os = require("node:os");
 import path = require("node:path");
 import crypto = require("node:crypto");
 import net = require("node:net");
-import type { ChildProcess } from "node:child_process";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { maskClientIp } from "./ip-anonymization";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
@@ -15,7 +16,16 @@ import { Readable, Transform } from "node:stream";
 import type { Request, Response, NextFunction } from "express";
 import { neon } from "@neondatabase/serverless";
 
-const youtubeDl: any = require("youtube-dl-exec");
+interface YoutubeDlOptions {
+  noConfig?: boolean; noCacheDir?: boolean; noWarnings?: boolean; noPlaylist?: boolean; newline?: boolean;
+  socketTimeout?: number; retries?: number; fragmentRetries?: number; matchFilter?: string;
+  extractAudio?: boolean; audioFormat?: "mp3"; audioQuality?: string; ffmpegLocation?: string; output?: string;
+}
+type YoutubeDlChild = ChildProcess & PromiseLike<unknown>;
+interface YoutubeDlModule {
+  exec(url: string, options: YoutubeDlOptions, spawnOptions?: SpawnOptions): YoutubeDlChild;
+}
+const youtubeDl = require("youtube-dl-exec") as YoutubeDlModule;
 const ffmpegPath: string | null = require("ffmpeg-static") as string | null;
 
 const app = express();
@@ -57,6 +67,7 @@ interface InvalidInstagramUrl { ok: false; reason: string; }
 interface ResolverMediaItem { type?: string; url?: string; duration?: number | string; }
 interface PublicResolverPayload {
   ok?: boolean; platform?: string; code?: string; error?: string; message?: string;
+  retry_after?: string | number; retryAfter?: string | number;
   title?: string; author?: string; duration?: number | string; media?: ResolverMediaItem[];
   private?: boolean; is_private?: boolean; login_required?: boolean; requires_login?: boolean;
 }
@@ -74,7 +85,7 @@ type MediaAssetAttempt =
   | { ok: false; reason: string; retryAfterSeconds?: number };
 
 
-type ErrorField = "name" | "message" | "stderr" | "exitCode";
+type ErrorField = "name" | "message" | "stderr" | "exitCode" | "status" | "type";
 
 function errorField(error: unknown, field: ErrorField): unknown {
   if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
@@ -404,6 +415,11 @@ function safeConversionError(error: unknown, timedOut: boolean): string {
 const INSTAGRAM_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
 const MAX_SOURCE_BYTES = 150 * 1024 * 1024;
 
+function readableFromWeb(body: globalThis.ReadableStream<Uint8Array> | null): Readable {
+  if (!body) throw new Error("Media response body missing");
+  return Readable.fromWeb(body as unknown as NodeReadableStream<Uint8Array>);
+}
+
 function getConfiguredMediaResolverUrl(): string | null {
   const configured = process.env.MEDIA_RESOLVER_URL?.trim();
   if (!configured) return null;
@@ -685,7 +701,7 @@ async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outp
         reason = /instagram|source/.test(lower) ? "instagram-rate-limited" : "resolver-rate-limited";
       }
       else if (/not found|removed|deleted|does not exist/.test(lower)) reason = "reel-unavailable";
-      return { ok: false, reason, retryAfterSeconds: parseRetryAfterSeconds(String((payload as any)?.retry_after || (payload as any)?.retryAfter || "")), detail: upstreamText.slice(0, 180) };
+      return { ok: false, reason, retryAfterSeconds: parseRetryAfterSeconds(String(payload?.retry_after || payload?.retryAfter || "")), detail: upstreamText.slice(0, 180) };
     }
 
     const candidates = payload.media.filter(
@@ -719,7 +735,7 @@ async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outp
 
     try {
       await pipeline(
-        Readable.fromWeb(media.response.body as any),
+        readableFromWeb(media.response.body),
         limiter,
         fs.createWriteStream(inputPath, { flags: "wx" }),
         { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
@@ -882,7 +898,7 @@ async function tryPublicHtmlToMp3(sourceUrl: string, directory: string, outputPa
 
     try {
       await pipeline(
-        Readable.fromWeb(media.response.body as any),
+        readableFromWeb(media.response.body),
         limiter,
         fs.createWriteStream(inputPath, { flags: "wx" }),
         { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
@@ -976,7 +992,7 @@ async function tryEasyDownToMp3(sourceUrl: string, directory: string, outputPath
 
     try {
       await pipeline(
-        Readable.fromWeb(downloaded.response.body as any),
+        readableFromWeb(downloaded.response.body),
         limiter,
         fs.createWriteStream(inputPath, { flags: "wx" }),
         { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
@@ -1063,7 +1079,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   let audioTitle: string | undefined;
   let audioAuthor: string | undefined;
   const cleanup = () => fs.rm(directory, { recursive: true, force: true }, () => {});
-  let child: any = null;
+  let child: YoutubeDlChild | null = null;
   let fallbackChild: ChildProcess | null = null;
   let timeout: NodeJS.Timeout | null = null;
   let timedOut = false;
@@ -1109,7 +1125,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   let providerFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicResolver: ConversionAttempt = { ok: false, reason: "not-attempted" };
-  let extractorError: any = null;
+  let extractorError: unknown = null;
 
   try {
     publicFallback = await tryPublicHtmlToMp3(
@@ -1320,7 +1336,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
 
   cleanup();
   const diagnosticText = [
-    String(extractorError?.stderr || extractorError?.message || ""),
+    String(errorField(extractorError, "stderr") || errorMessage(extractorError)),
     stderrTail,
     stdoutTail
   ].join("\\n");
@@ -1351,10 +1367,14 @@ app.post("/api/convert", async (req: Request, res: Response) => {
 app.use("/api", (_req, res) => res.status(404).json({ error: "API endpoint not found." }));
 app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (res.headersSent) return;
-  console.error("Request failed:", err?.type || err?.name || "unknown error");
-  res.status(err?.status || 500).json({ error: "Something went wrong. Please refresh and try again." });
+  console.error("Request failed:", String(errorField(err, "type") || errorName(err)));
+  const candidateStatus = Number(errorField(err, "status"));
+  const status = Number.isInteger(candidateStatus) && candidateStatus >= 400 && candidateStatus <= 599
+    ? candidateStatus
+    : 500;
+  res.status(status).json({ error: "Something went wrong. Please refresh and try again." });
 });
 
 module.exports = app;
