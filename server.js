@@ -135,7 +135,7 @@ function safeConversionError(error, timedOut) {
   if (timedOut) return "This Reel took too long to process. Try a shorter Reel.";
   const message = String(error?.stderr || error?.message || "").toLowerCase();
 
-  if (/duration|match-filter|longer than/.test(message)) {
+  if (/(?:duration[^\\n]{0,80}(?:exceeds?|greater than|longer than|above|over|>\\s*\\d+)|(?:exceeds?|greater than|longer than|over|>\\s*\\d+)[^\\n]{0,80}duration|video too long|filtered out[^\\n]{0,80}duration|duration[^\\n]{0,80}(?:limit|600\\s*(?:s|seconds)|10\\s*minutes))/i.test(message)) {
     return "This video is longer than the 10-minute limit.";
   }
   if (/login|required|private|401|403|challenge|checkpoint|rate.?limit|429|not authorized/.test(message)) {
