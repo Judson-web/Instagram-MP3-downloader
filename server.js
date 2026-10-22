@@ -7,15 +7,16 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { pipeline } = require("node:stream/promises");
+const { Readable, Transform } = require("node:stream");
 const youtubeDl = require("youtube-dl-exec");
 const ffmpegPath = require("ffmpeg-static");
 const { neon } = require("@neondatabase/serverless");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const MAX_DURATION_SECONDS = 10 * 60;
+const MAX_DURATION_SECONDS = 20 * 60;
 const MAX_REQUESTS_PER_HOUR = 8;
-const PROCESS_TIMEOUT_MS = 240 * 1000;
+const PROCESS_TIMEOUT_MS = 50 * 1000;
 const QUALITY_PRESETS = new Set(["128", "192", "320"]);
 const ALLOWED_HOSTS = new Set([
   "instagram.com",
@@ -23,7 +24,7 @@ const ALLOWED_HOSTS = new Set([
   "m.instagram.com"
 ]);
 const regularPostPath = /^\/(?:reel|reels|p|tv)\/[A-Za-z0-9_-]+\/?$/i;
-const sharedPostPath = /^\/share\/reel\/[A-Za-z0-9_-]+\/?$/i;
+const sharedPostPath = /^\/share\/reel\/([A-Za-z0-9_-]+)\/?$/i;
 const requestsByIp = new Map();
 let localRequestCounter = 0;
 let sqlClient;
@@ -78,9 +79,11 @@ function validateInstagramUrl(raw) {
     return { ok: false, reason: "Use a public Instagram Reel link that starts with https://www.instagram.com/." };
   }
 
-  if (!regularPostPath.test(parsed.pathname) && !sharedPostPath.test(parsed.pathname)) {
+  const sharedCode = parsed.pathname.match(sharedPostPath)?.[1];
+  if (!regularPostPath.test(parsed.pathname) && !sharedCode) {
     return { ok: false, reason: "That URL doesn't look like an Instagram Reel or video post link." };
   }
+  if (sharedCode) parsed.pathname = "/reel/" + sharedCode + "/";
 
   parsed.search = "";
   parsed.hash = "";
@@ -151,8 +154,8 @@ function safeConversionError(error, timedOut) {
   if (timedOut) return "This Reel took too long to process. Try a shorter Reel.";
   const message = String(error?.stderr || error?.message || "").toLowerCase();
 
-  if (/(?:duration[^\\n]{0,80}(?:exceeds?|greater than|longer than|above|over|>\\s*\\d+)|(?:exceeds?|greater than|longer than|over|>\\s*\\d+)[^\\n]{0,80}duration|video too long|filtered out[^\\n]{0,80}duration|duration[^\\n]{0,80}(?:limit|600\\s*(?:s|seconds)|10\\s*minutes))/i.test(message)) {
-    return "This video is longer than the 10-minute limit.";
+  if (/(?:duration[^\n]{0,80}(?:exceeds?|greater than|longer than|above|over|>\s*\d+)|(?:exceeds?|greater than|longer than|over|>\s*\d+)[^\n]{0,80}duration|video too long|filtered out[^\n]{0,80}duration|duration[^\n]{0,80}(?:limit|1200\s*(?:s|seconds)|20\s*minutes))/i.test(message)) {
+    return "This video is longer than the 20-minute limit.";
   }
   if (/login|required|private|401|403|challenge|checkpoint|rate.?limit|429|not authorized/.test(message)) {
     return "Instagram couldn't provide this media publicly. The Reel may be private, login-gated, unavailable, or temporarily restricted.";
@@ -164,6 +167,270 @@ function safeConversionError(error, timedOut) {
     return "The conversion engine isn't ready. Please try again shortly.";
   }
   return "Couldn't extract audio from that link. Make sure the Reel is public, then try again.";
+}
+
+
+const INSTAGRAM_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
+const MAX_SOURCE_BYTES = 150 * 1024 * 1024;
+
+function isAllowedMediaAsset(raw) {
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    return parsed.protocol === "https:" &&
+      !parsed.username &&
+      !parsed.password &&
+      (host === "cdninstagram.com" ||
+        host.endsWith(".cdninstagram.com") ||
+        host === "fbcdn.net" ||
+        host.endsWith(".fbcdn.net"));
+  } catch {
+    return false;
+  }
+}
+
+function extractInstagramVideoVersions(html) {
+  const marker = "video_versions";
+  const keyPosition = html.indexOf(marker);
+  if (keyPosition < 0) return [];
+  const colon = html.indexOf(":", keyPosition + marker.length);
+  const arrayStart = html.indexOf("[", colon);
+  if (colon < 0 || arrayStart < 0 || arrayStart - colon > 24) return [];
+
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  let arrayEnd = -1;
+  for (let i = arrayStart; i < html.length; i++) {
+    const character = html[i];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quoted = false;
+    } else {
+      if (character === '"') quoted = true;
+      else if (character === "[") depth++;
+      else if (character === "]") {
+        depth--;
+        if (depth === 0) {
+          arrayEnd = i + 1;
+          break;
+        }
+      }
+    }
+  }
+
+  if (arrayEnd < 0) return [];
+  try {
+    const versions = JSON.parse(
+      html.slice(arrayStart, arrayEnd)
+        .replaceAll("\\/", "/")
+        .replaceAll("\\u0026", "&")
+    );
+    if (!Array.isArray(versions)) return [];
+    return versions
+      .filter((item) => item && typeof item.url === "string" && isAllowedMediaAsset(item.url))
+      .sort((a, b) => (Number(b.width || 0) * Number(b.height || 0)) -
+                      (Number(a.width || 0) * Number(a.height || 0)));
+  } catch {
+    return [];
+  }
+}
+
+function getInstagramVideoDuration(html) {
+  const match = html.match(/"video_duration"\s*:\s*(\d+(?:\.\d+)?)/i);
+  return match ? Number(match[1]) : null;
+}
+
+async function fetchInstagramMediaAsset(rawUrl, parentSignal) {
+  let current = rawUrl;
+  for (let redirects = 0; redirects <= 3; redirects++) {
+    if (!isAllowedMediaAsset(current)) {
+      return { ok: false, reason: "untrusted-media-host" };
+    }
+
+    const response = await fetch(current, {
+      method: "GET",
+      redirect: "manual",
+      headers: {
+        "User-Agent": INSTAGRAM_BROWSER_UA,
+        "Referer": "https://www.instagram.com/",
+        "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.5"
+      },
+      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)])
+    });
+
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      await response.body?.cancel().catch(() => {});
+      if (!location || redirects === 3) return { ok: false, reason: "media-redirect-failed" };
+      current = new URL(location, current).toString();
+      continue;
+    }
+
+    if (!response.ok || !response.body) {
+      await response.body?.cancel().catch(() => {});
+      return { ok: false, reason: "media-not-public" };
+    }
+
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (contentLength > MAX_SOURCE_BYTES) {
+      await response.body.cancel().catch(() => {});
+      return { ok: false, reason: "media-too-large" };
+    }
+
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("video") && !current.toLowerCase().includes(".mp4")) {
+      await response.body.cancel().catch(() => {});
+      return { ok: false, reason: "not-a-video" };
+    }
+
+    return { ok: true, response, url: current, contentLength };
+  }
+  return { ok: false, reason: "media-redirect-failed" };
+}
+
+async function encodeDownloadedVideo(inputPath, outputPath, quality, signal, setProcess) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("conversion cancelled"));
+      return;
+    }
+
+    let finished = false;
+    let timedOut = false;
+    let stderr = "";
+    const child = spawn(ffmpegPath, [
+      "-hide_banner",
+      "-nostdin",
+      "-loglevel", "error",
+      "-y",
+      "-i", inputPath,
+      "-vn",
+      "-map", "0:a:0?",
+      "-codec:a", "libmp3lame",
+      "-b:a", String(quality) + "k",
+      "-map_metadata", "-1",
+      "-f", "mp3",
+      outputPath
+    ], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+
+    setProcess(child);
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, 90000);
+    timeout.unref?.();
+
+    const abortHandler = () => child.kill("SIGKILL");
+    signal.addEventListener("abort", abortHandler, { once: true });
+
+    const finish = (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", abortHandler);
+      setProcess(null);
+      if (error) reject(error);
+      else resolve(true);
+    };
+
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + chunk.toString()).slice(-4000);
+    });
+    child.once("error", (error) => finish(error));
+    child.once("close", (code) => {
+      if (signal.aborted) return finish(new Error("conversion cancelled"));
+      if (timedOut) return finish(new Error("ffmpeg timeout"));
+      if (code !== 0) return finish(new Error(stderr || "ffmpeg could not encode audio"));
+      try {
+        if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 128) {
+          return finish(new Error("ffmpeg produced no usable audio"));
+        }
+        return finish(null);
+      } catch (error) {
+        return finish(error);
+      }
+    });
+  });
+}
+
+async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess) {
+  const inputPath = path.join(directory, "source.mp4");
+  try {
+    const pageResponse = await fetch(sourceUrl, {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        "User-Agent": INSTAGRAM_BROWSER_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.instagram.com/"
+      },
+      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(20000)])
+    });
+
+    if (!pageResponse.ok) return { ok: false, reason: "instagram-page-unavailable" };
+    const pageHost = new URL(pageResponse.url || sourceUrl).hostname.toLowerCase();
+    if (!ALLOWED_HOSTS.has(pageHost)) return { ok: false, reason: "instagram-page-redirected" };
+
+    const pageLength = Number(pageResponse.headers.get("content-length") || 0);
+    if (pageLength > 5 * 1024 * 1024) {
+      await pageResponse.body?.cancel().catch(() => {});
+      return { ok: false, reason: "instagram-page-too-large" };
+    }
+
+    const html = await pageResponse.text();
+    if (html.length > 5 * 1024 * 1024) return { ok: false, reason: "instagram-page-too-large" };
+
+    const duration = getInstagramVideoDuration(html);
+    if (duration !== null && duration > MAX_DURATION_SECONDS) {
+      return { ok: false, reason: "duration-limit" };
+    }
+
+    const versions = extractInstagramVideoVersions(html);
+    if (!versions.length) return { ok: false, reason: "no-public-video-metadata" };
+
+    const selected = versions[0];
+    const media = await fetchInstagramMediaAsset(selected.url, parentSignal);
+    if (!media.ok) return media;
+
+    let totalBytes = 0;
+    const limiter = new Transform({
+      transform(chunk, _encoding, callback) {
+        totalBytes += chunk.length;
+        if (totalBytes > MAX_SOURCE_BYTES) callback(new Error("source video exceeded the size limit"));
+        else callback(null, chunk);
+      }
+    });
+
+    try {
+      await pipeline(
+        Readable.fromWeb(media.response.body),
+        limiter,
+        fs.createWriteStream(inputPath, { flags: "wx" }),
+        { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
+      );
+    } catch (error) {
+      fs.rmSync(inputPath, { force: true });
+      if (error?.name === "AbortError") return { ok: false, reason: "media-download-timeout" };
+      if (/size limit/.test(String(error?.message || ""))) return { ok: false, reason: "media-too-large" };
+      return { ok: false, reason: "media-download-failed" };
+    }
+
+    if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+    await encodeDownloadedVideo(inputPath, outputPath, quality, parentSignal, setProcess);
+    return { ok: true, reason: "public-html-media" };
+  } catch (error) {
+    if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+    return {
+      ok: false,
+      reason: "public-html-fallback-failed",
+      diagnostic: safeExtractorDiagnostic(String(error?.message || ""), null)
+    };
+  } finally {
+    fs.rm(path.join(directory, "source.mp4"), { force: true }, () => {});
+  }
 }
 
 app.get("/api/health", (_req, res) => {
