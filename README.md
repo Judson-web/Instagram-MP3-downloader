@@ -5,8 +5,9 @@ ReelTone converts public Instagram Reel and video-post URLs into downloadable MP
 ## Stack
 
 - Express on Vercel Fluid Compute
-- yt-dlp via `youtube-dl-exec`
-- FFmpeg via `ffmpeg-static`
+- Public Reel HTML/CDN media extraction with bounded size, redirect, and timeout checks
+- FFmpeg via `ffmpeg-static` for MP3 encoding
+- yt-dlp via `youtube-dl-exec` as a secondary extractor
 - Neon Postgres for persistent per-IP rate limiting, storing a keyed hash rather than raw IP addresses
 
 ## Features
@@ -42,7 +43,7 @@ Set these environment variables for Production, Preview, and Development where a
 - `YOUTUBE_DL_FILENAME=yt-dlp_linux`
 - `YOUTUBE_DL_SKIP_PYTHON_CHECK=true`
 
-`vercel.json` includes the media binaries in the server function bundle and sets the 300-second maximum function duration. Vercel serves the files under `public/` from its CDN; Express handles the API.
+`vercel.json` includes the media binaries in the server function bundle and sets the 300-second maximum function duration. Vercel serves the files under `public/` from its CDN; Express handles the API. The serverless function region is configured for Mumbai (`bom1`) to keep the API close to users in India.
 
 ## Neon
 
@@ -53,11 +54,11 @@ Use the standalone Neon project named `instagram-mp3-converter` in Singapore. It
 - `GET /api/health` returns service health.
 - `POST /api/convert` accepts JSON such as `{"url":"https://www.instagram.com/reel/SHORTCODE/","quality":"192"}` and responds with `audio/mpeg` when conversion succeeds, or a JSON error when it fails.
 
-Valid quality values are `128`, `192`, and `320`. The default duration limit is 10 minutes and each IP is limited to eight attempts per hour. Extraction is stopped after four minutes to leave time for the result to stream.
+Valid quality values are `128`, `192`, and `320`. The default duration limit is 20 minutes, downloaded source media is capped at 150 MiB, and each IP is limited to eight attempts per hour. The direct-media path has bounded fetch/encode steps; the yt-dlp fallback is stopped after 50 seconds to leave time for the result to stream.
 
 ## Notes
 
-Instagram availability changes; some public URLs may still be unavailable to third-party tools. The app does not request Instagram passwords or attempt to access private or login-gated videos. Use audio you have permission to download or reuse.
+Instagram availability changes, and its HTML/media delivery can differ for datacenter requests. ReelTone first checks for public video metadata in the Reel page and then tries yt-dlp; if neither can obtain a stream, it reports a recoverable error. It does not request Instagram passwords or attempt to access private media. Use audio you have permission to download or reuse.
 
 ReelTone is independent and is not affiliated with Instagram or Meta.
 
