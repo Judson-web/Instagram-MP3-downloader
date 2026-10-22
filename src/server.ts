@@ -121,7 +121,10 @@ function classifyConversionFailure(evidence: string, timedOut = false): { status
   if (/(?:login[-_ ]required|redirected to the login page|sign in to (?:view|continue)|log in to (?:view|continue)|authentication required|requires? (?:you to )?(?:log in|sign in))/.test(message)) {
     return { status: 422, payload: { code: "LOGIN_REQUIRED", title: "Instagram requires a signed-in session", error: "This link is gated behind Instagram login or an age/visibility check. ReelTone does not use account cookies or ask for your password, so this Reel cannot be processed here.", retryable: false, category: "privacy" } };
   }
-  if (/cobalt-rate-limited/.test(message)) {\n    return { status: 503, payload: { code: "RESOLVER_RATE_LIMITED", title: "The extraction service is temporarily limiting requests", error: "The configured extraction provider is rate-limiting requests. Wait briefly and try again.", retryable: true, category: "rate-limit", retryAfterSeconds: DEFAULT_SOURCE_COOLDOWN_SECONDS } };\n  }\n  if (/resolver-rate-limited|resolver-cooldown/.test(message)) {
+  if (/cobalt-rate-limited/.test(message)) {
+    return { status: 503, payload: { code: "RESOLVER_RATE_LIMITED", title: "The extraction service is temporarily limiting requests", error: "The configured extraction provider is rate-limiting requests. Wait briefly and try again.", retryable: true, category: "rate-limit", retryAfterSeconds: DEFAULT_SOURCE_COOLDOWN_SECONDS } };
+  }
+  if (/resolver-rate-limited|resolver-cooldown/.test(message)) {
     return { status: 503, payload: { code: "RESOLVER_RATE_LIMITED", title: "The link lookup service is cooling down", error: "The lookup provider is temporarily limiting requests. ReelTone will pause calls to it instead of repeatedly retrying.", retryable: true, category: "rate-limit", retryAfterSeconds: DEFAULT_SOURCE_COOLDOWN_SECONDS } };
   }
   if (/provider-rate-limited|provider-cooldown/.test(message)) {
