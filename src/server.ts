@@ -49,6 +49,7 @@ interface ResolverMediaItem { type?: string; url?: string; duration?: number | s
 interface PublicResolverPayload {
   ok?: boolean; platform?: string; code?: string; error?: string; message?: string;
   title?: string; author?: string; duration?: number | string; media?: ResolverMediaItem[];
+  private?: boolean; is_private?: boolean; login_required?: boolean; requires_login?: boolean;
 }
 interface ConversionAttempt {
   ok: boolean;
@@ -75,7 +76,7 @@ function classifyConversionFailure(evidence: string, timedOut = false): { status
   if (/(?:^|[\\s:_-])private(?:$|[\\s,.:_-])|private account|private reel|only the owner|media is private|is_private/.test(message)) {
     return { status: 422, payload: { code: "PRIVATE_REEL", title: "This Reel appears to be private", error: "Instagram or the resolver explicitly marked this media as private. ReelTone only processes media available publicly without signing in.", retryable: false, category: "privacy" } };
   }
-  if (/(?:login_required|login required|redirected to the login page|sign in to (?:view|continue)|log in to (?:view|continue)|authentication required|requires? (?:you to )?(?:log in|sign in))/.test(message)) {
+  if (/(?:login[-_ ]required|redirected to the login page|sign in to (?:view|continue)|log in to (?:view|continue)|authentication required|requires? (?:you to )?(?:log in|sign in))/.test(message)) {
     return { status: 422, payload: { code: "LOGIN_REQUIRED", title: "Instagram requires a signed-in session", error: "This link is gated behind Instagram login or an age/visibility check. ReelTone does not use account cookies or ask for your password, so this Reel cannot be processed here.", retryable: false, category: "privacy" } };
   }
   if (/(?:exceeded the rate.?limit|too many requests|rate.?limit|http error 429|status.?429|instagram-rate-limited|resolver-rate-limited)/.test(message)) {
@@ -471,8 +472,8 @@ async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality,
       const upstreamText = String(payload?.code || "") + " " + String(payload?.error || payload?.message || "");
       const lower = upstreamText.toLowerCase();
       let reason = "no-public-media";
-      if (/private|is_private/.test(lower)) reason = "private-reel";
-      else if (/login_required|login required|sign in|authentication required/.test(lower)) reason = "login-required";
+      if (payload.private === true || payload.is_private === true || /private|is_private/.test(lower)) reason = "private-reel";
+      else if (payload.login_required === true || payload.requires_login === true || /login[-_ ]required|sign in|authentication required/.test(lower)) reason = "login-required";
       else if (/rate.?limit|too many requests|429/.test(lower)) reason = "instagram-rate-limited";
       else if (/not found|removed|deleted|does not exist/.test(lower)) reason = "reel-unavailable";
       return { ok: false, reason, detail: upstreamText.slice(0, 180) };
@@ -586,10 +587,15 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
       }
 
       const finalUrl = pageResponse.url || pageUrl;
-      const finalHost = new URL(finalUrl).hostname.toLowerCase();
+      const finalParsed = new URL(finalUrl);
+      const finalHost = finalParsed.hostname.toLowerCase();
+      if (ALLOWED_HOSTS.has(finalHost) && /^\\/accounts\\/login\\/?$/i.test(finalParsed.pathname)) {
+        await pageResponse.body?.cancel().catch(() => {});
+        return { ok: false, reason: "login-required", diagnostic: pageLabel + ":redirected-to-login" };
+      }
       if (!pageResponse.ok || !ALLOWED_HOSTS.has(finalHost)) {
         await pageResponse.body?.cancel().catch(() => {});
-        lastReason = "instagram-page-unavailable";
+        lastReason = pageResponse.status === 404 ? "reel-unavailable" : "instagram-page-unavailable";
         pageDiagnostics.push(`${pageLabel}:http-${pageResponse.status}:${ALLOWED_HOSTS.has(finalHost) ? "ig" : "redirect"}`);
         continue;
       }
@@ -616,6 +622,18 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
         continue;
       }
 
+      if (/<title>\\s*Page Not Found\\b/i.test(html) || /"message"\\s*:\\s*"This page is not available/i.test(html)) {
+        return { ok: false, reason: "reel-unavailable", diagnostic: pageLabel + ":page-not-found" };
+      }
+      const explicitPrivate = /"is_private"\\s*:\\s*true|"private"\\s*:\\s*true|this account is private|this reel is private|this video is private/i.test(html);
+      if (explicitPrivate) {
+        return { ok: false, reason: "private-reel", diagnostic: pageLabel + ":explicit-private-signal" };
+      }
+      const explicitLogin = /"error_type"\\s*:\\s*"login_required"|"login_required"\\s*:\\s*true|"message"\\s*:\\s*"[^"]{0,100}login required|redirected to the login page/i.test(html);
+      if (explicitLogin) {
+        return { ok: false, reason: "login-required", diagnostic: pageLabel + ":explicit-login-signal" };
+      }
+
       const candidateDuration = getInstagramVideoDuration(html);
       if (candidateDuration !== null) {
         duration = candidateDuration;
@@ -623,7 +641,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
       }
 
       const versions = extractInstagramVideoVersions(html);
-      pageDiagnostics.push(`${pageLabel}:${pageResponse.status}:${html.length}:${/video_url/i.test(html) ? 1 : 0}:${/video_versions/i.test(html) ? 1 : 0}:${/not-logged-in|login required|log in to continue/i.test(html) ? 1 : 0}:${versions.length}`);
+      pageDiagnostics.push(`${pageLabel}:${pageResponse.status}:${html.length}:${/video_url/i.test(html) ? 1 : 0}:${/video_versions/i.test(html) ? 1 : 0}:${versions.length}`);
       if (versions.length) {
         selected = versions[0];
         break;
@@ -945,6 +963,11 @@ app.post("/api/convert", async (req, res) => {
     if (publicFallback.reason === "media-too-large") {
       cleanup();
       return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
+    }
+    if (["private-reel", "login-required", "reel-unavailable"].includes(publicFallback.reason)) {
+      cleanup();
+      const failure = classifyConversionFailure(publicFallback.reason + " " + String(publicFallback.diagnostic || ""));
+      return sendApiError(res, failure.status, failure.payload);
     }
     if (publicFallback.reason === "cancelled" || fallbackController.signal.aborted) {
       cleanup();
