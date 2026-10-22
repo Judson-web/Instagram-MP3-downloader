@@ -469,33 +469,102 @@ app.post("/api/convert", async (req, res) => {
   }
 
   const outputPath = path.join(directory, "audio.mp3");
-  let child;
+  const cleanup = () => fs.rm(directory, { recursive: true, force: true }, () => {});
+  let child = null;
+  let fallbackChild = null;
+  let timeout = null;
   let timedOut = false;
   let clientDisconnected = false;
   let stderrTail = "";
   let stdoutTail = "";
-  const cleanup = () => fs.rm(directory, { recursive: true, force: true }, () => {});
+  const fallbackController = new AbortController();
 
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    if (child && typeof child.kill === "function") child.kill("SIGKILL");
-  }, PROCESS_TIMEOUT_MS);
-  timeout.unref?.();
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      clientDisconnected = true;
+      fallbackController.abort();
+      if (child && typeof child.kill === "function") child.kill("SIGTERM");
+      if (fallbackChild && typeof fallbackChild.kill === "function") fallbackChild.kill("SIGKILL");
+      if (timeout) clearTimeout(timeout);
+      cleanup();
+    }
+  });
+
+  const streamResult = async () => {
+    const size = fs.statSync(outputPath).size;
+    if (size < 128) throw new Error("MP3 output was empty");
+    res.status(200);
+    res.set({
+      "Content-Type": "audio/mpeg",
+      "Content-Disposition": 'attachment; filename="reeltone.mp3"',
+      "Cache-Control": "no-store, private",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Length": String(size)
+    });
+    try {
+      await pipeline(fs.createReadStream(outputPath), res);
+    } finally {
+      cleanup();
+    }
+  };
+
+  let publicFallback = { ok: false, reason: "not-attempted" };
+  let extractorError = null;
 
   try {
+    // First use the public Reel HTML when it contains a direct, publicly served
+    // MP4 URL. This avoids depending solely on yt-dlp's Instagram extractor.
+    publicFallback = await tryPublicHtmlToMp3(
+      validated.url,
+      directory,
+      outputPath,
+      quality,
+      fallbackController.signal,
+      (process) => { fallbackChild = process; }
+    );
+
+    if (clientDisconnected || res.destroyed) {
+      cleanup();
+      return;
+    }
+
+    if (publicFallback.ok && fs.existsSync(outputPath)) {
+      await streamResult();
+      return;
+    }
+
+    if (publicFallback.reason === "duration-limit") {
+      cleanup();
+      return res.status(413).json({ error: "This Reel exceeds the 20-minute processing limit." });
+    }
+    if (publicFallback.reason === "media-too-large") {
+      cleanup();
+      return res.status(413).json({ error: "This video file is too large for the online converter." });
+    }
+    if (publicFallback.reason === "cancelled" || fallbackController.signal.aborted) {
+      cleanup();
+      return;
+    }
+
+    timeout = setTimeout(() => {
+      timedOut = true;
+      if (child && typeof child.kill === "function") child.kill("SIGKILL");
+    }, PROCESS_TIMEOUT_MS);
+    timeout.unref?.();
+
     child = youtubeDl.exec(validated.url, {
       noConfig: true,
       noCacheDir: true,
       noWarnings: true,
       noPlaylist: true,
       newline: true,
-      socketTimeout: 15,
+      socketTimeout: 12,
       retries: 1,
       fragmentRetries: 1,
-      matchFilter: `duration <= ${MAX_DURATION_SECONDS}`,
+      matchFilter: "duration <= " + MAX_DURATION_SECONDS,
       extractAudio: true,
       audioFormat: "mp3",
-      audioQuality: `${quality}K`,
+      audioQuality: quality + "K",
       ffmpegLocation: path.dirname(ffmpegPath),
       output: path.join(directory, "audio.%(ext)s")
     }, {
@@ -508,63 +577,63 @@ app.post("/api/convert", async (req, res) => {
       stderrTail = (stderrTail + chunk.toString()).slice(-8000);
     });
     child.stdout?.on("data", (chunk) => {
-      stdoutTail = (stdoutTail + chunk.toString()).slice(-2000);
-    });
-
-    // When a visitor cancels/closes the browser request, terminate the
-    // expensive subprocess and remove temporary files.
-    res.on("close", () => {
-      if (!res.writableEnded) {
-        clientDisconnected = true;
-        if (child && typeof child.kill === "function") child.kill("SIGTERM");
-        clearTimeout(timeout);
-        cleanup();
-      }
+      stdoutTail = (stdoutTail + chunk.toString()).slice(-3000);
     });
 
     await child;
-    clearTimeout(timeout);
+    child = null;
+    if (timeout) clearTimeout(timeout);
+    timeout = null;
 
     if (clientDisconnected || res.destroyed) {
       cleanup();
       return;
     }
 
-    if (!fs.existsSync(outputPath) || !fs.statSync(outputPath).isFile()) {
-      const diagnostic = safeExtractorDiagnostic(stderrTail + "\n" + stdoutTail, null);
-      console.warn("ReelTone extractor produced no MP3:", diagnostic);
-      cleanup();
-      return res.status(502).json({
-        error: safeConversionError({ stderr: stderrTail + "\n" + stdoutTail }, timedOut)
-      });
-    }
-
-    res.status(200);
-    res.set({
-      "Content-Type": "audio/mpeg",
-      "Content-Disposition": 'attachment; filename="reeltone.mp3"',
-      "Cache-Control": "no-store, private",
-      "X-Content-Type-Options": "nosniff",
-      "Content-Length": String(fs.statSync(outputPath).size)
-    });
-
-    try {
-      await pipeline(fs.createReadStream(outputPath), res);
-    } finally {
-      cleanup();
-    }
-  } catch (error) {
-    clearTimeout(timeout);
-    cleanup();
-    if (clientDisconnected || res.destroyed || res.headersSent) {
-      if (!res.writableEnded) res.destroy();
+    if (fs.existsSync(outputPath) && fs.statSync(outputPath).isFile()) {
+      await streamResult();
       return;
     }
-    console.warn("ReelTone conversion failed:", error?.exitCode ?? error?.name ?? "unknown error", "|", safeExtractorDiagnostic(stderrTail, error));
+
+    const diagnostic = safeExtractorDiagnostic(stderrTail + "\n" + stdoutTail, null);
+    console.warn("ReelTone extractor produced no MP3:", diagnostic);
+  } catch (error) {
+    extractorError = error;
+    if (timeout) clearTimeout(timeout);
+    timeout = null;
+    child = null;
+
+    if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
+      cleanup();
+      if (!res.writableEnded && res.headersSent) res.destroy();
+      return;
+    }
+
+    console.warn(
+      "ReelTone conversion failed:",
+      error?.exitCode ?? error?.name ?? "unknown error",
+      "|",
+      safeExtractorDiagnostic(stderrTail, error)
+    );
+  }
+
+  if (clientDisconnected || res.destroyed || res.headersSent) {
+    cleanup();
+    if (!res.writableEnded && res.headersSent) res.destroy();
+    return;
+  }
+
+  cleanup();
+  const diagnosticText = stderrTail + "\n" + stdoutTail + "\n" +
+    String(extractorError?.stderr || extractorError?.message || "");
+  const mappedError = safeConversionError({ stderr: diagnosticText }, timedOut);
+  if (mappedError === "Couldn't extract audio from that link. Make sure the Reel is public, then try again." &&
+      ["instagram-page-unavailable", "instagram-page-redirected", "no-public-video-metadata", "media-not-public", "public-html-fallback-failed"].includes(publicFallback.reason)) {
     return res.status(502).json({
-      error: safeConversionError({ stderr: stderrTail + "\n" + String(error?.stderr || error?.message || "") }, timedOut)
+      error: "Instagram did not expose a downloadable video stream for this link. The Reel may be login-gated or temporarily unavailable."
     });
   }
+  return res.status(502).json({ error: mappedError });
 });
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "API endpoint not found." }));
