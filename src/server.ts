@@ -589,7 +589,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
       const finalUrl = pageResponse.url || pageUrl;
       const finalParsed = new URL(finalUrl);
       const finalHost = finalParsed.hostname.toLowerCase();
-      if (ALLOWED_HOSTS.has(finalHost) && /^\\/accounts\\/login\\/?$/i.test(finalParsed.pathname)) {
+      if (ALLOWED_HOSTS.has(finalHost) && /^\/accounts\/login\/?$/i.test(finalParsed.pathname)) {
         await pageResponse.body?.cancel().catch(() => {});
         return { ok: false, reason: "login-required", diagnostic: pageLabel + ":redirected-to-login" };
       }
