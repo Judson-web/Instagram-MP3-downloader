@@ -20,7 +20,12 @@ const byId = <T extends HTMLElement>(id: string): T => {
   const urlInput = byId<HTMLInputElement>("reel-url");
   const inputWrap = byId<HTMLDivElement>("url-input-wrap");
   const urlHint = byId<HTMLParagraphElement>("url-hint");
-  const qualityInput = byId<HTMLSelectElement>("quality");
+  const qualityInput = byId<HTMLInputElement>("quality");
+  const qualityPicker = byId<HTMLDivElement>("quality-select");
+  const qualityTrigger = byId<HTMLButtonElement>("quality-trigger");
+  const qualityCurrent = byId<HTMLSpanElement>("quality-current");
+  const qualityOptions = byId<HTMLDivElement>("quality-options");
+  const qualityOptionButtons = Array.from(qualityOptions.querySelectorAll<HTMLButtonElement>("[data-quality]"));
   const pasteButton = byId<HTMLButtonElement>("paste-button");
   const convertButton = byId<HTMLButtonElement>("convert-button");
   const progressPanel = byId<HTMLElement>("progress-panel");
@@ -44,6 +49,8 @@ const byId = <T extends HTMLElement>(id: string): T => {
   const resultAuthor = byId<HTMLElement>("result-author");
   const resultExpiry = byId<HTMLParagraphElement>("result-expiry");
   const retryButton = byId<HTMLButtonElement>("retry-button");
+  const themeToggle = byId<HTMLButtonElement>("theme-toggle");
+  const themeColorMeta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
 
   const allowedHosts = new Set(["instagram.com", "www.instagram.com", "m.instagram.com"]);
   const regularPostPath = /^\/(?:reel|reels|p|tv)\/[A-Za-z0-9_-]+\/?$/i;
@@ -67,10 +74,66 @@ const byId = <T extends HTMLElement>(id: string): T => {
     element.hidden = !visible;
   }
 
+  function syncQualityOptions() {
+    qualityOptionButtons.forEach((option) => {
+      const selected = option.dataset.quality === qualityInput.value;
+      option.setAttribute("aria-selected", String(selected));
+      option.tabIndex = -1;
+    });
+    qualityCurrent.textContent = qualityInput.value + " kbps";
+    qualityTrigger.setAttribute("aria-label", "Audio quality: " + qualityInput.value + " kbps");
+  }
+
+  function closeQualityList(restoreFocus = false) {
+    qualityOptions.hidden = true;
+    qualityTrigger.setAttribute("aria-expanded", "false");
+    qualityPicker.classList.remove("is-open");
+    if (restoreFocus) qualityTrigger.focus();
+  }
+
+  function openQualityList(focusSelected = true) {
+    if (busy) return;
+    qualityOptions.hidden = false;
+    qualityTrigger.setAttribute("aria-expanded", "true");
+    qualityPicker.classList.add("is-open");
+    const selected = qualityOptionButtons.find((option) => option.dataset.quality === qualityInput.value);
+    (focusSelected ? selected : qualityOptionButtons[0])?.focus();
+  }
+
+  function chooseQuality(value: string) {
+    if (!["128", "192", "320"].includes(value)) return;
+    qualityInput.value = value;
+    syncQualityOptions();
+    closeQualityList(false);
+    qualityTrigger.focus();
+  }
+
+  type Theme = "light" | "dark";
+  const themeStorageKey = "reeltone-theme";
+
+  function applyTheme(theme: Theme, persist = true) {
+    const isDark = theme === "dark";
+    document.documentElement.dataset.theme = theme;
+    themeToggle.setAttribute("aria-pressed", String(isDark));
+    themeToggle.setAttribute("aria-label", isDark ? "Switch to light mode" : "Switch to dark mode");
+    themeToggle.title = isDark ? "Switch to light mode" : "Switch to dark mode";
+    themeToggle.innerHTML = (isDark
+      ? '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.3 15.1A8.6 8.6 0 0 1 8.9 3.7 8.7 8.7 0 1 0 20.3 15.1Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>')
+      + '<span id="theme-toggle-label">' + (isDark ? "Light mode" : "Dark mode") + "</span>";
+    if (themeColorMeta) themeColorMeta.content = isDark ? "#171816" : "#f7f6f2";
+    if (persist) {
+      try { window.localStorage.setItem(themeStorageKey, theme); } catch { /* Storage may be disabled. */ }
+    }
+  }
+
   function setBusy(value) {
     busy = value;
     urlInput.disabled = value;
     qualityInput.disabled = value;
+    qualityTrigger.disabled = value;
+    qualityOptionButtons.forEach((option) => { option.disabled = value; });
+    if (value) closeQualityList(false);
     pasteButton.disabled = value;
     convertButton.disabled = value;
     cancelButton.disabled = !value;
@@ -356,6 +419,53 @@ const byId = <T extends HTMLElement>(id: string): T => {
     }
   });
 
+  syncQualityOptions();
+  qualityTrigger.addEventListener("click", () => {
+    if (qualityOptions.hidden) openQualityList();
+    else closeQualityList(false);
+  });
+  qualityOptionButtons.forEach((option) => {
+    option.addEventListener("click", () => chooseQuality(option.dataset.quality || ""));
+    option.addEventListener("keydown", (event: KeyboardEvent) => {
+      const index = qualityOptionButtons.indexOf(option);
+      let next = index;
+      if (event.key === "ArrowDown") next = (index + 1) % qualityOptionButtons.length;
+      else if (event.key === "ArrowUp") next = (index - 1 + qualityOptionButtons.length) % qualityOptionButtons.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = qualityOptionButtons.length - 1;
+      else if (event.key === "Escape") { event.preventDefault(); closeQualityList(true); return; }
+      else if (event.key === "Tab") { closeQualityList(false); return; }
+      else return;
+      event.preventDefault();
+      qualityOptionButtons[next]?.focus();
+    });
+  });
+  qualityTrigger.addEventListener("keydown", (event: KeyboardEvent) => {
+    if (["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      if (qualityOptions.hidden) openQualityList(event.key !== "ArrowDown");
+      else qualityOptionButtons[0]?.focus();
+    } else if (event.key === "Escape") closeQualityList(false);
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!qualityPicker.contains(event.target as Node)) closeQualityList(false);
+  });
+  document.addEventListener("focusin", (event) => {
+    if (!qualityPicker.contains(event.target as Node)) closeQualityList(false);
+  });
+
+  const savedTheme = (() => {
+    try {
+      const saved = window.localStorage.getItem(themeStorageKey);
+      if (saved === "light" || saved === "dark") return saved as Theme;
+    } catch { /* Storage may be disabled. */ }
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  })();
+  applyTheme(savedTheme, false);
+  themeToggle.addEventListener("click", () => {
+    applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+  });
+
   pasteButton.addEventListener("click", async () => {
     try {
       if (!navigator.clipboard || !navigator.clipboard.readText) throw new Error("Clipboard unavailable");
@@ -408,6 +518,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
     form.hidden = false;
     form.reset();
     qualityInput.value = "192";
+    syncQualityOptions();
     audioTitle = "";
     audioAuthor = "";
     audioDownloadName = "reeltone.mp3";

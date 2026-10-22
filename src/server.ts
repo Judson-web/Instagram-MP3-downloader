@@ -788,6 +788,17 @@ app.get("/api/health", async (_req: Request, res: Response) => {
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "Service health check failed", error: "The application is live, but its dedicated Neon database is not reachable.", retryable: true, category: "service" });
   }
 });
+app.get("/api/health/badge", async (_req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const sql = getSql();
+    if (!sql) throw new Error("DATABASE_URL is not configured");
+    await sql`SELECT 1 AS ok`;
+    return res.status(200).json({ schemaVersion: 1, label: "site & database", message: "operational", color: "brightgreen", namedLogo: "vercel" });
+  } catch {
+    return res.status(200).json({ schemaVersion: 1, label: "site & database", message: "unavailable", color: "red", isError: true, namedLogo: "vercel" });
+  }
+});
 
 app.post("/api/convert", async (req, res) => {
   const validated = validateInstagramUrl(req.body?.url);

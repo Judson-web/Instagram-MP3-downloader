@@ -2,18 +2,53 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f7f6f2">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://instagram-mp3-downloader.vercel.app/">
   <meta name="description" content="Convert publicly accessible Instagram Reels to MP3 with ReelTone. Choose your bitrate and download the audio without an account.">
-  <meta property="og:title" content="ReelTone · Reel to MP3">
-  <meta property="og:description" content="A straightforward way to convert public Instagram Reels to MP3 audio.">
+  <meta property="og:site_name" content="ReelTone">
+  <meta property="og:url" content="https://instagram-mp3-downloader.vercel.app/">
+  <meta property="og:locale" content="en_IN">
+  <meta property="og:title" content="Instagram Reel to MP3 Converter | ReelTone">
+  <meta property="og:description" content="Convert publicly accessible Instagram Reels to MP3. Choose your bitrate and download the audio without signing in.">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Instagram Reel to MP3 Converter | ReelTone">
+  <meta name="twitter:description" content="Convert publicly accessible Instagram Reels to MP3 with bitrate options and temporary downloads.">
   <meta property="og:type" content="website">
-  <title>ReelTone · Reel to MP3</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%239c7bff'/%3E%3Cpath d='M9 22h4l3-9 5 17 4-13 3 5h3' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/styles.css">
-  <script src="/app.js" defer></script>
+  <title>Instagram Reel to MP3 Converter | ReelTone</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%2320231f'/%3E%3Cpath d='M9 22h4l3-9 5 17 4-13 3 5h3' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css?v=4">
+  <script src="/app.js?v=4" defer></script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "ReelTone",
+    "url": "https://instagram-mp3-downloader.vercel.app/",
+    "description": "Convert publicly accessible Instagram Reels and video posts into MP3 audio with a choice of bitrates.",
+    "applicationCategory": "MultimediaApplication",
+    "operatingSystem": "Any",
+    "browserRequirements": "Requires JavaScript and a modern web browser",
+    "inLanguage": "en-IN"
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {"@type":"Question","name":"Which links are supported?","acceptedAnswer":{"@type":"Answer","text":"Public Instagram Reels and video post links are supported. Private, removed, or login-gated videos may not be accessible."}},
+      {"@type":"Question","name":"Do I need to upload a video or sign in?","acceptedAnswer":{"@type":"Answer","text":"No file upload or Instagram login is required. If Instagram does not expose media directly, a third-party resolver is used to look up public media."}},
+      {"@type":"Question","name":"How are private or login-gated Reels handled?","acceptedAnswer":{"@type":"Answer","text":"When Instagram explicitly identifies a Reel as private or login-required, ReelTone shows that status. Ambiguous missing-media responses are described as no public video found."}},
+      {"@type":"Question","name":"Why did a link not convert?","acceptedAnswer":{"@type":"Answer","text":"Instagram availability and anonymous request limits can change. Check the link, wait if requests are being limited, and try again."}}
+    ]
+  }
+  </script>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
   <header class="site-header">
     <a class="brand" href="/" aria-label="ReelTone home">
       <span class="brand-mark" aria-hidden="true">
@@ -21,10 +56,17 @@
       </span>
       <span>reel<span class="brand-accent">tone</span></span>
     </a>
-    <a class="header-link" href="#how-it-works">How it works <span aria-hidden="true">↗</span></a>
+    <nav class="header-actions" aria-label="Site navigation">
+      <a class="header-link" href="#how-it-works">How it works <span aria-hidden="true">↗</span></a>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to dark mode" aria-pressed="false" title="Switch to dark mode">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.3 15.1A8.6 8.6 0 0 1 8.9 3.7 8.7 8.7 0 1 0 20.3 15.1Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+        <span id="theme-toggle-label">Dark mode</span>
+      </button>
+    </nav>
   </header>
+  <noscript><p class="noscript-notice">ReelTone needs JavaScript enabled to validate links and create downloads.</p></noscript>
 
-  <main>
+  <main id="main-content">
     <section class="hero" aria-labelledby="hero-title">
       <div class="hero-copy">
         <div class="eyebrow"><span class="eyebrow-dot"></span> INSTAGRAM REEL TO MP3</div>
@@ -61,17 +103,22 @@
 
           <div class="quality-row">
             <div class="quality-copy">
-              <label class="field-label" for="quality">AUDIO QUALITY</label>
+              <span class="field-label" id="quality-label">AUDIO QUALITY</span>
               <span>Balance file size and audio quality</span>
             </div>
-            <div class="select-wrap">
-              <select id="quality" name="quality" aria-label="Audio quality">
-                <option value="128">128 kbps</option>
-                <option value="192" selected>192 kbps</option>
-                <option value="320">320 kbps</option>
-              </select>
-              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m5 7.5 5 5 5-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <input type="hidden" id="quality" name="quality" value="192">
+            <div class="quality-select" id="quality-select">
+              <button class="quality-trigger" id="quality-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="quality-options" aria-labelledby="quality-label quality-current">
+                <span id="quality-current">192 kbps</span>
+                <svg class="quality-chevron" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m5 7.5 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+              <div class="quality-options" id="quality-options" role="listbox" aria-labelledby="quality-label" hidden>
+                <button class="quality-option" type="button" role="option" data-quality="128" aria-selected="false" tabindex="-1"><span><strong>128 kbps</strong><small>Smaller file size</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
+                <button class="quality-option" type="button" role="option" data-quality="192" aria-selected="true" tabindex="-1"><span><strong>192 kbps</strong><small>Balanced audio quality</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
+                <button class="quality-option" type="button" role="option" data-quality="320" aria-selected="false" tabindex="-1"><span><strong>320 kbps</strong><small>Higher bitrate, larger file</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
+              </div>
             </div>
+            <span class="visually-hidden" id="quality-status" role="status" aria-live="polite"></span>
           </div>
 
           <button class="convert-button" id="convert-button" type="submit">
@@ -116,7 +163,7 @@
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Download MP3
           </button>
-          <p class="result-expiry" id="result-expiry">Download link expires in 10:00.</p>
+          <p class="result-expiry" id="result-expiry" aria-live="off">Download link expires in 10:00.</p>
           <button class="text-button new-conversion" id="new-conversion-button" type="button">Convert another Reel</button>
         </section>
 
