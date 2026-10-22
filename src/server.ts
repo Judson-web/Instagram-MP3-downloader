@@ -654,7 +654,7 @@ async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outp
       return { ok: false, reason: "resolver-http-" + response.status };
     }
 
-    const payload = await response.json().catch(() => null) as PublicResolverPayload | null;
+    const payload = await response.json().catch((): null => null) as PublicResolverPayload | null;
     if (!payload || payload.ok !== true || !Array.isArray(payload.media)) {
       const upstreamText = String(payload?.code || "") + " " + String(payload?.error || payload?.message || "");
       const lower = upstreamText.toLowerCase();
@@ -904,7 +904,7 @@ async function tryEasyDownToMp3(sourceUrl: string, directory: string, outputPath
       signal: AbortSignal.any([parentSignal, AbortSignal.timeout(15000)])
     });
 
-    const payload = await response.json().catch(() => null);
+    const payload = await response.json().catch((): null => null);
     if (response.status === 401 || response.status === 403) {
       return { ok: false, reason: "provider-auth-failed" };
     }
