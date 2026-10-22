@@ -32,7 +32,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const MAX_DURATION_SECONDS = 20 * 60;
 const MAX_REQUESTS_PER_HOUR = 8;
-const PROCESS_TIMEOUT_MS = 50 * 1000;
+const PROCESS_TIMEOUT_MS = 16 * 1000;
 const QUALITY_PRESETS = new Set(["128", "192", "256", "320"]);
 const ALLOWED_HOSTS = new Set([
   "instagram.com",
@@ -567,7 +567,7 @@ async function fetchInstagramMediaAsset(rawUrl: string, parentSignal: AbortSigna
         "Referer": "https://www.instagram.com/",
         "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.5"
       },
-      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)])
+      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(30000)])
     });
 
     if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -741,7 +741,7 @@ async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outp
         readableFromWeb(media.response.body),
         limiter,
         fs.createWriteStream(inputPath, { flags: "wx" }),
-        { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
+        { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(30000)]) }
       );
     } catch (error) {
       fs.rmSync(inputPath, { force: true });
@@ -778,11 +778,7 @@ async function tryPublicHtmlToMp3(sourceUrl: string, directory: string, outputPa
     const shortCode = canonicalPath.match(/^\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)$/i)?.[1];
     const pageCandidates = [
       "https://www.instagram.com" + canonicalPath + "/embed/",
-      "https://www.instagram.com" + canonicalPath + "/embed/captioned/",
-      ...(shortCode ? [
-        "https://www.instagram.com/p/" + shortCode + "/embed/",
-        "https://www.instagram.com/p/" + shortCode + "/embed/captioned/"
-      ] : []),
+      ...(shortCode ? ["https://www.instagram.com/p/" + shortCode + "/embed/captioned/"] : []),
       sourceUrl
     ];
 
@@ -806,7 +802,7 @@ async function tryPublicHtmlToMp3(sourceUrl: string, directory: string, outputPa
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://www.instagram.com/"
           },
-          signal: AbortSignal.any([parentSignal, AbortSignal.timeout(14000)])
+          signal: AbortSignal.any([parentSignal, AbortSignal.timeout(6000)])
         });
       } catch (error) {
         if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
@@ -904,7 +900,7 @@ async function tryPublicHtmlToMp3(sourceUrl: string, directory: string, outputPa
         readableFromWeb(media.response.body),
         limiter,
         fs.createWriteStream(inputPath, { flags: "wx" }),
-        { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
+        { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(30000)]) }
       );
     } catch (error) {
       fs.rmSync(inputPath, { force: true });
@@ -998,7 +994,7 @@ async function tryEasyDownToMp3(sourceUrl: string, directory: string, outputPath
         readableFromWeb(downloaded.response.body),
         limiter,
         fs.createWriteStream(inputPath, { flags: "wx" }),
-        { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
+        { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(30000)]) }
       );
     } catch (error) {
       fs.rmSync(inputPath, { force: true });
@@ -1073,8 +1069,8 @@ function isAllowedCobaltDownloadUrl(raw: string, endpoint: URL): boolean {
 
 function titleFromCobaltFilename(filename?: string): string | undefined {
   if (!filename) return undefined;
-  const basename = path.basename(filename).replace(/[\\r\\n\\u0000-\\u001f]/g, " ").trim();
-  const title = basename.replace(/\\.[A-Za-z0-9]{1,8}$/, "").trim().slice(0, 180);
+  const basename = path.basename(filename).replace(/[\r\n\u0000-\u001f]/g, " ").trim();
+  const title = basename.replace(/\.[A-Za-z0-9]{1,8}$/, "").trim().slice(0, 180);
   return title || undefined;
 }
 
@@ -1120,7 +1116,7 @@ async function tryCobaltToMp3(
           }),
           // A dedicated API may be waking from idle. Allow it time to start,
           // then make one bounded retry rather than failing the whole conversion.
-          signal: AbortSignal.any([parentSignal, AbortSignal.timeout(28000)])
+          signal: AbortSignal.any([parentSignal, AbortSignal.timeout(9000)])
         });
       } catch (error) {
         if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
@@ -1199,7 +1195,7 @@ async function tryCobaltToMp3(
           "User-Agent": INSTAGRAM_BROWSER_UA,
           "Accept": "audio/mpeg,audio/*,application/octet-stream,*/*;q=0.5"
         },
-        signal: AbortSignal.any([parentSignal, AbortSignal.timeout(75000)])
+        signal: AbortSignal.any([parentSignal, AbortSignal.timeout(25000)])
       });
 
       if ([301, 302, 303, 307, 308].includes(mediaResponse.status)) {
@@ -1248,7 +1244,7 @@ async function tryCobaltToMp3(
           readableFromWeb(mediaResponse.body),
           limiter,
           fs.createWriteStream(inputPath, { flags: "wx" }),
-          { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(75000)]) }
+          { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(25000)]) }
         );
       } catch (error) {
         fs.rmSync(inputPath, { force: true });
@@ -1400,6 +1396,16 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   let publicFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicResolver: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let extractorError: unknown = null;
+  let stageStartedAt = Date.now();
+  const stageSummary: string[] = [];
+  const recordStage = (name: string, reason: string): void => {
+    const elapsedMs = Date.now() - stageStartedAt;
+    const safeReason = String(reason || "unknown").replace(/[^a-z0-9_-]/gi, "").slice(0, 64);
+    const entry = name + ":" + elapsedMs + "ms:" + safeReason;
+    stageSummary.push(entry);
+    console.info("ReelTone conversion stage", entry);
+    stageStartedAt = Date.now();
+  };
 
   try {
     publicFallback = await tryPublicHtmlToMp3(
@@ -1410,6 +1416,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       fallbackController.signal,
       (process) => { fallbackChild = process; }
     );
+    recordStage("instagram-html", publicFallback.reason);
 
     if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
       cleanup();
@@ -1452,6 +1459,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         (process) => { fallbackChild = process; },
         cobaltEndpoint
       );
+      recordStage("cobalt", cobaltFallback.reason);
 
       if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
         cleanup();
@@ -1486,6 +1494,8 @@ app.post("/api/convert", async (req: Request, res: Response) => {
           fallbackController.signal,
           (process) => { fallbackChild = process; }
         );
+
+    recordStage("easydown", providerFallback.reason);
 
     if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
       cleanup();
@@ -1538,6 +1548,8 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       }
     }
 
+    recordStage("media-resolver", publicResolver.reason);
+
     if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
       cleanup();
       return;
@@ -1580,9 +1592,9 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       noWarnings: true,
       noPlaylist: true,
       newline: true,
-      socketTimeout: 12,
-      retries: 1,
-      fragmentRetries: 1,
+      socketTimeout: 8,
+      retries: 0,
+      fragmentRetries: 0,
       matchFilter: "duration <= " + MAX_DURATION_SECONDS,
       extractAudio: true,
       audioFormat: "mp3",
@@ -1603,6 +1615,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     });
 
     await child;
+    recordStage("yt-dlp", "process-exited");
     child = null;
     if (timeout) clearTimeout(timeout);
     timeout = null;
@@ -1620,9 +1633,9 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     // Some yt-dlp/FFmpeg combinations exit successfully but leave the source
     // in its original audio/video container instead of naming it audio.mp3.
     // Recover any real artifact instead of returning a false "no media" failure.
-    const audioExtensions = /\\.(?:m4a|webm|opus|ogg|oga|aac|wav|flac|mp4|mov|mkv|aiff?)$/i;
+    const audioExtensions = /\.(?:m4a|webm|opus|ogg|oga|aac|wav|flac|mp4|mov|mkv|aiff?)$/i;
     const artifactCandidates = fs.readdirSync(directory, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && /^audio\\./i.test(entry.name) && audioExtensions.test(entry.name))
+      .filter((entry) => entry.isFile() && /^audio\./i.test(entry.name) && audioExtensions.test(entry.name))
       .map((entry) => ({ path: path.join(directory, entry.name), name: entry.name, size: fs.statSync(path.join(directory, entry.name)).size }))
       .filter((entry) => entry.size >= 128)
       .sort((left, right) => right.size - left.size);
@@ -1637,12 +1650,12 @@ app.post("/api/convert", async (req: Request, res: Response) => {
           (process) => { fallbackChild = process; }
         );
         if (fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 128) {
-          audioTitle = audioTitle || artifact.name.replace(/\\.[^.]+$/, "").slice(0, 180);
+          audioTitle = audioTitle || artifact.name.replace(/\.[^.]+$/, "").slice(0, 180);
           await streamResult();
           return;
         }
       } catch (error) {
-        stderrTail = (stderrTail + "\\nartifact-transcode:" + errorName(error)).slice(-8000);
+        stderrTail = (stderrTail + "\nartifact-transcode:" + errorName(error)).slice(-8000);
       }
     }
 
@@ -1655,7 +1668,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         catch { return entry.name.slice(0, 80) + ":unavailable"; }
       })
       .join(",");
-    const diagnostic = safeExtractorDiagnostic(stderrTail + "\\n" + stdoutTail, null);
+    const diagnostic = safeExtractorDiagnostic(stderrTail + "\n" + stdoutTail, null);
     console.warn("ReelTone extractor produced no MP3; generated files [" + generatedFiles + "]:", diagnostic);
   } catch (error) {
     extractorError = error;
@@ -1690,6 +1703,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     stdoutTail
   ].join("\\n");
   const failureEvidence = [
+    stageSummary.join(" "),
     cobaltFallback.reason,
     cobaltFallback.diagnostic || "",
     providerFallback.reason,

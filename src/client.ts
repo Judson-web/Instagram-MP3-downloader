@@ -381,7 +381,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
   function makeDownloadName(title: string): string {
     const normalized = (title || "reeltone")
       .normalize("NFKD")
-      .replace(/[\\u0300-\\u036f]/g, "")
+      .replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-zA-Z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
       .slice(0, 70)
