@@ -5,10 +5,10 @@ ReelTone converts public Instagram Reel and video-post URLs into downloadable MP
 ## Stack
 
 - Express on Vercel Fluid Compute
-- Public Reel HTML/CDN media extraction with bounded size, redirect, and timeout checks
-- FFmpeg via `ffmpeg-static` for MP3 encoding
-- yt-dlp via `youtube-dl-exec` as a secondary extractor
 - Neon Postgres for persistent per-IP rate limiting, storing a keyed hash rather than raw IP addresses
+- A public URL resolver as a fallback for retrieving the CDN media URL when Instagram's HTML is unavailable to datacenter requests
+- FFmpeg via `ffmpeg-static` for MP3 encoding
+- yt-dlp via `youtube-dl-exec` as a final extraction fallback
 
 ## Features
 
@@ -16,7 +16,7 @@ ReelTone converts public Instagram Reel and video-post URLs into downloadable MP
 - Select 128, 192, or 320 kbps MP3 output
 - Stream the completed MP3 directly from the conversion function to the browser
 - Animated progress, cancellation, result state, and local browser download
-- Host and path validation, request-size limits, safe headers, bounded duration, extraction timeout, and request throttling
+- Host and path validation, CDN host allow-list, bounded source size, timeouts, safe headers, duration checks, and request throttling
 - Automatic removal of temporary media from the function's scratch directory
 
 ## Local development
@@ -34,7 +34,7 @@ The app has an in-memory rate-limit fallback for local development if `DATABASE_
 
 ## Deploy on Vercel
 
-The repository is configured to deploy as a Vercel Express application. Connect this repository to a **new** Vercel project named `instagram-mp3-downloader`. Do not reuse the Auto Redeemer project.
+The repository is configured to deploy as a Vercel Express application. Connect this repository to the dedicated Vercel project named `instagram-mp3-downloader`. It must remain separate from the Auto Redeemer project.
 
 Set these environment variables for Production, Preview, and Development where appropriate:
 
@@ -43,7 +43,7 @@ Set these environment variables for Production, Preview, and Development where a
 - `YOUTUBE_DL_FILENAME=yt-dlp_linux`
 - `YOUTUBE_DL_SKIP_PYTHON_CHECK=true`
 
-`vercel.json` includes the media binaries in the server function bundle and sets the 300-second maximum function duration. Vercel serves the files under `public/` from its CDN; Express handles the API. The serverless function region is configured for Mumbai (`bom1`) to keep the API close to users in India.
+`vercel.json` includes the conversion engine assets in the server function bundle and sets a 300-second maximum function duration. Vercel serves files under `public/`; the Express function handles conversion.
 
 ## Neon
 
@@ -54,13 +54,13 @@ Use the standalone Neon project named `instagram-mp3-converter` in Singapore. It
 - `GET /api/health` returns service health.
 - `POST /api/convert` accepts JSON such as `{"url":"https://www.instagram.com/reel/SHORTCODE/","quality":"192"}` and responds with `audio/mpeg` when conversion succeeds, or a JSON error when it fails.
 
-Valid quality values are `128`, `192`, and `320`. The default duration limit is 20 minutes, downloaded source media is capped at 150 MiB, and each IP is limited to eight attempts per hour. The direct-media path has bounded fetch/encode steps; the yt-dlp fallback is stopped after 50 seconds to leave time for the result to stream.
+Valid quality values are `128`, `192`, and `320`. The default duration limit is 20 minutes, downloaded source media is capped at 150 MiB, and each IP is limited to eight attempts per hour. Conversion is time-bounded to fit a serverless request.
 
-## Notes
+## Media resolution and privacy
 
-Instagram availability changes, and its HTML/media delivery can differ for datacenter requests. ReelTone first checks for public video metadata in the Reel page and then tries yt-dlp; if neither can obtain a stream, it reports a recoverable error. It does not request Instagram passwords or attempt to access private media. Use audio you have permission to download or reuse.
+ReelTone first asks a public URL resolver for metadata and a media URL when direct Instagram HTML does not expose the video to the serverless environment. The app then accepts media URLs only from allow-listed Instagram CDN domains, downloads the source to temporary server storage, and creates the MP3 with FFmpeg on its own Vercel function. The submitted public Reel URL is sent to the resolver; the app never asks for Instagram credentials or uses browser cookies to access private content. Resolver availability can change, so a public Reel is not guaranteed to convert every time.
 
-ReelTone is independent and is not affiliated with Instagram or Meta.
+Use audio you have permission to download or reuse. ReelTone is independent and is not affiliated with Instagram or Meta.
 
 ## License
 
