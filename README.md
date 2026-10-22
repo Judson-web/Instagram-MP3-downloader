@@ -21,7 +21,7 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 - Temporary browser download that expires after ten minutes.
 - Clear, specific messages for invalid or unavailable links.
 - Responsive desktop and mobile layouts.
-- Search metadata, social sharing metadata, a branded 1200 × 630 Open Graph/Twitter preview card, and structured data.
+- Search metadata, social sharing metadata, a branded 1200 × 630 Open Graph/Twitter preview card (PNG generated from the editable SVG source during build), and structured data.
 - Application health endpoint and live status badge.
 
 ## Technology
@@ -32,7 +32,7 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 - **Deployment:** Vercel
 - **Checks:** TypeScript compiler and GitHub Actions
 
-TypeScript is the maintained application source. JavaScript runtime bundles are generated during the build and excluded from source control.
+TypeScript is the maintained application source, including the preview-image build step. Browser and Node.js runtime JavaScript plus the PNG preview are generated during the build and excluded from source control.
 
 ## Local development
 
@@ -50,7 +50,7 @@ Keep environment files and secret values out of Git. Configure deployment variab
 
 ## Health and API
 
-- **Social previews:** Open Graph and Twitter/X metadata use the branded `public/og-card.svg` image.
+- **Social previews:** Open Graph and Twitter/X metadata use the branded generated `public/og-card.png` image (source artwork: `public/og-card.svg`).
 - **Application/database health:** [`/api/health`](https://instagram-mp3-downloader.vercel.app/api/health).
 - **Badge data:** [`/api/health/badge`](https://instagram-mp3-downloader.vercel.app/api/health/badge).
 - **Build workflow:** [GitHub Actions](https://github.com/Judson-web/Instagram-MP3-downloader/actions/workflows/ci.yml).

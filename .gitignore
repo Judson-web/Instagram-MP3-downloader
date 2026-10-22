@@ -6,3 +6,4 @@ public/app.js
 .env
 .env.*
 !.env.example
+public/og-card.png
