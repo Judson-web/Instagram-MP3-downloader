@@ -890,7 +890,7 @@ async function tryPublicHtmlToMp3(sourceUrl: string, directory: string, outputPa
     } catch (error) {
       fs.rmSync(inputPath, { force: true });
       if (errorName(error) === "AbortError") return { ok: false, reason: "media-download-timeout" };
-      if (/size limit/.test(String(error?.message || ""))) return { ok: false, reason: "media-too-large" };
+      if (/size limit/.test(errorMessage(error))) return { ok: false, reason: "media-too-large" };
       return { ok: false, reason: "media-download-failed" };
     }
 
@@ -902,7 +902,7 @@ async function tryPublicHtmlToMp3(sourceUrl: string, directory: string, outputPa
     return {
       ok: false,
       reason: "public-html-fallback-failed",
-      diagnostic: safeExtractorDiagnostic(String(error?.message || ""), null)
+      diagnostic: safeExtractorDiagnostic(errorMessage(error), null)
     };
   } finally {
     fs.rm(path.join(directory, "source.mp4"), { force: true }, () => {});
@@ -983,8 +983,8 @@ async function tryEasyDownToMp3(sourceUrl: string, directory: string, outputPath
       );
     } catch (error) {
       fs.rmSync(inputPath, { force: true });
-      if (error?.name === "AbortError") return { ok: false, reason: "media-download-timeout" };
-      if (/size limit/.test(String(error?.message || ""))) return { ok: false, reason: "media-too-large" };
+      if (errorName(error) === "AbortError") return { ok: false, reason: "media-download-timeout" };
+      if (/size limit/.test(errorMessage(error))) return { ok: false, reason: "media-too-large" };
       return { ok: false, reason: "media-download-failed" };
     }
 
@@ -995,7 +995,7 @@ async function tryEasyDownToMp3(sourceUrl: string, directory: string, outputPath
     return {
       ok: false,
       reason: "provider-request-failed",
-      diagnostic: safeExtractorDiagnostic(String(error?.message || ""), null)
+      diagnostic: safeExtractorDiagnostic(errorMessage(error), null)
     };
   } finally {
     fs.rm(path.join(directory, "provider-source.bin"), { force: true }, () => {});
