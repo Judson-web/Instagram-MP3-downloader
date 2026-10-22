@@ -6,6 +6,8 @@ import fs = require("node:fs");
 import os = require("node:os");
 import path = require("node:path");
 import crypto = require("node:crypto");
+import net = require("node:net");
+import type { ChildProcess } from "node:child_process";
 import { maskClientIp } from "./ip-anonymization";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
@@ -29,9 +31,9 @@ const ALLOWED_HOSTS = new Set([
 ]);
 const regularPostPath = /^\/(?:reel|reels|p|tv)\/[A-Za-z0-9_-]+\/?$/i;
 const sharedPostPath = /^\/share\/reel\/([A-Za-z0-9_-]+)\/?$/i;
-const requestsByIp = new Map();
+const requestsByIp = new Map<string, number[]>();
 let localRequestCounter = 0;
-let sqlClient;
+let sqlClient: ReturnType<typeof neon> | null = null;
 
 type ApiErrorCode =
   | "INVALID_URL" | "INVALID_QUALITY" | "RATE_LIMITED" | "DATABASE_UNAVAILABLE"
@@ -47,6 +49,11 @@ interface ApiErrorPayload {
   category: "input" | "privacy" | "availability" | "rate-limit" | "service" | "conversion";
   retryAfterSeconds?: number;
 }
+type QualityPreset = "128" | "192" | "256" | "320";
+type ProcessSetter = (process: ChildProcess | null) => void;
+interface VideoVersion { url: string; width: number; height: number; }
+interface ValidatedInstagramUrl { ok: true; url: string; }
+interface InvalidInstagramUrl { ok: false; reason: string; }
 interface ResolverMediaItem { type?: string; url?: string; duration?: number | string; }
 interface PublicResolverPayload {
   ok?: boolean; platform?: string; code?: string; error?: string; message?: string;
@@ -175,12 +182,12 @@ function clientKey(req: Request): string {
 }
 
 
-function validateInstagramUrl(raw) {
+function validateInstagramUrl(raw: unknown): ValidatedInstagramUrl | InvalidInstagramUrl {
   if (typeof raw !== "string" || raw.length > 2048) {
     return { ok: false, reason: "Paste a valid Instagram Reel link." };
   }
 
-  let parsed;
+  let parsed: URL;
   try {
     parsed = new URL(raw.trim());
   } catch {
@@ -209,7 +216,7 @@ function validateInstagramUrl(raw) {
   return { ok: true, url: parsed.toString() };
 }
 
-function getSql() {
+function getSql(): ReturnType<typeof neon> | null {
   if (!process.env.DATABASE_URL) return null;
   if (!sqlClient) sqlClient = neon(process.env.DATABASE_URL);
   return sqlClient;
@@ -309,7 +316,7 @@ function sourceCooldownError(res: Response, source: SourceCooldownKey, remaining
   });
 }
 
-async function checkRateLimit(ip) {
+async function checkRateLimit(ip: string): Promise<boolean> {
   const sql = getSql();
   const ipHash = makeIpHash(ip);
   if (!sql) {
@@ -340,7 +347,7 @@ async function checkRateLimit(ip) {
   return Number(rows[0]?.request_count || 0) <= MAX_REQUESTS_PER_HOUR;
 }
 
-function safeExtractorDiagnostic(stderr, error) {
+function safeExtractorDiagnostic(stderr: unknown, error: any): string {
   const combined = [
     String(stderr || ""),
     String(error?.stderr || ""),
@@ -356,7 +363,7 @@ function safeExtractorDiagnostic(stderr, error) {
   return lines.slice(-3).join(" | ").slice(0, 500) || "no extractor diagnostic";
 }
 
-function safeConversionError(error, timedOut) {
+function safeConversionError(error: any, timedOut: boolean): string {
   if (timedOut) return "This Reel took too long to process. Try a shorter Reel.";
   const message = String(error?.stderr || error?.message || "").toLowerCase();
 
@@ -379,7 +386,47 @@ function safeConversionError(error, timedOut) {
 const INSTAGRAM_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
 const MAX_SOURCE_BYTES = 150 * 1024 * 1024;
 
-function isAllowedMediaAsset(raw) {
+function getConfiguredMediaResolverUrl(): string | null {
+  const configured = process.env.MEDIA_RESOLVER_URL?.trim();
+  if (!configured) return null;
+
+  try {
+    const endpoint = new URL(configured);
+    const host = endpoint.hostname.toLowerCase();
+    const localHostname = host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local");
+    if (
+      endpoint.protocol !== "https:" ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.hash ||
+      localHostname ||
+      net.isIP(host) !== 0
+    ) {
+      console.error("MEDIA_RESOLVER_URL is invalid; optional resolver disabled.");
+      return null;
+    }
+    return endpoint.toString();
+  } catch {
+    console.error("MEDIA_RESOLVER_URL is invalid; optional resolver disabled.");
+    return null;
+  }
+}
+
+function timestampedDownloadFilename(title?: string): string {
+  const normalized = String(title || "reeltone")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64)
+    .toLowerCase() || "reeltone";
+  const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  const suffix = crypto.randomBytes(4).toString("hex");
+  return normalized + "-" + timestamp + "-" + suffix + ".mp3";
+}
+
+function isAllowedMediaAsset(raw: unknown): boolean {
+  if (typeof raw !== "string") return false;
   try {
     const parsed = new URL(raw);
     const host = parsed.hostname.toLowerCase();
@@ -395,8 +442,8 @@ function isAllowedMediaAsset(raw) {
   }
 }
 
-function extractInstagramVideoVersions(html) {
-  const directVideos = [];
+function extractInstagramVideoVersions(html: string): VideoVersion[] {
+  const directVideos: VideoVersion[] = [];
   const directPattern = /\\?"video_url\\?"\s*:\s*\\?"(https?:[^"]+)/gi;
   let directMatch;
   while ((directMatch = directPattern.exec(html)) !== null) {
@@ -463,12 +510,12 @@ function extractInstagramVideoVersions(html) {
     return directVideos;
   }
 }
-function getInstagramVideoDuration(html) {
+function getInstagramVideoDuration(html: string): number | null {
   const match = html.match(/"video_duration"\s*:\s*(\d+(?:\.\d+)?)/i);
   return match ? Number(match[1]) : null;
 }
 
-async function fetchInstagramMediaAsset(rawUrl, parentSignal): Promise<MediaAssetAttempt> {
+async function fetchInstagramMediaAsset(rawUrl: string, parentSignal: AbortSignal): Promise<MediaAssetAttempt> {
   let current = rawUrl;
   for (let redirects = 0; redirects <= 3; redirects++) {
     if (!isAllowedMediaAsset(current)) {
@@ -520,7 +567,7 @@ async function fetchInstagramMediaAsset(rawUrl, parentSignal): Promise<MediaAsse
   return { ok: false, reason: "media-redirect-failed" };
 }
 
-async function encodeDownloadedVideo(inputPath, outputPath, quality, signal, setProcess) {
+async function encodeDownloadedVideo(inputPath: string, outputPath: string, quality: QualityPreset, signal: AbortSignal, setProcess: ProcessSetter): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(new Error("conversion cancelled"));
@@ -585,10 +632,10 @@ async function encodeDownloadedVideo(inputPath, outputPath, quality, signal, set
   });
 }
 
-async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess): Promise<ConversionAttempt> {
+async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outputPath: string, quality: QualityPreset, parentSignal: AbortSignal, setProcess: ProcessSetter, resolverEndpoint: string): Promise<ConversionAttempt> {
   const inputPath = path.join(directory, "resolver-source.mp4");
   try {
-    const resolverUrl = new URL("https://weirddl.sbs/api/info");
+    const resolverUrl = new URL(resolverEndpoint);
     resolverUrl.searchParams.set("url", sourceUrl);
 
     const response = await fetch(resolverUrl, {
@@ -683,7 +730,7 @@ async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality,
   }
 }
 
-async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess): Promise<ConversionAttempt> {
+async function tryPublicHtmlToMp3(sourceUrl: string, directory: string, outputPath: string, quality: QualityPreset, parentSignal: AbortSignal, setProcess: ProcessSetter): Promise<ConversionAttempt> {
   const inputPath = path.join(directory, "source.mp4");
   try {
     const canonical = new URL(sourceUrl);
@@ -699,8 +746,8 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
       sourceUrl
     ];
 
-    let selected = null;
-    let duration = null;
+    let selected: VideoVersion | null = null;
+    let duration: number | null = null;
     let lastReason = "no-public-video-metadata";
     const pageDiagnostics = [];
 
@@ -841,7 +888,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
   }
 }
 
-async function tryEasyDownToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess): Promise<ConversionAttempt> {
+async function tryEasyDownToMp3(sourceUrl: string, directory: string, outputPath: string, quality: QualityPreset, parentSignal: AbortSignal, setProcess: ProcessSetter): Promise<ConversionAttempt> {
   const token = process.env.EASYDOWN_API_TOKEN;
   if (!token) return { ok: false, reason: "provider-not-configured" };
 
@@ -957,12 +1004,12 @@ app.get("/api/health/badge", async (_req: Request, res: Response) => {
   }
 });
 
-app.post("/api/convert", async (req, res) => {
+app.post("/api/convert", async (req: Request, res: Response) => {
   const validated = validateInstagramUrl(req.body?.url);
   if (!validated.ok) return sendApiError(res, 400, { code: "INVALID_URL", title: "Check your Instagram link", error: validated.reason, retryable: false, category: "input" });
 
-  const quality = String(req.body?.quality || "192");
-  if (!QUALITY_PRESETS.has(quality)) {
+  const requestedQuality = String(req.body?.quality || "192");
+  if (!QUALITY_PRESETS.has(requestedQuality)) {
     return sendApiError(res, 400, { code: "INVALID_QUALITY", title: "Choose an audio quality", error: "Select 128, 192, 256, or 320 kbps, then start the conversion again.", retryable: false, category: "input" });
   }
 
@@ -981,6 +1028,7 @@ app.post("/api/convert", async (req, res) => {
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "The converter is temporarily unavailable", error: "The rate-limit database could not be reached. No conversion was started; please try again shortly.", retryable: true, category: "service" });
   }
 
+  const quality = requestedQuality as QualityPreset;
   const id = crypto.randomUUID();
   const directory = path.join(os.tmpdir(), "reeltone", id);
   try {
@@ -993,9 +1041,9 @@ app.post("/api/convert", async (req, res) => {
   let audioTitle: string | undefined;
   let audioAuthor: string | undefined;
   const cleanup = () => fs.rm(directory, { recursive: true, force: true }, () => {});
-  let child = null;
-  let fallbackChild = null;
-  let timeout = null;
+  let child: any = null;
+  let fallbackChild: ChildProcess | null = null;
+  let timeout: NodeJS.Timeout | null = null;
   let timedOut = false;
   let clientDisconnected = false;
   let stderrTail = "";
@@ -1016,10 +1064,12 @@ app.post("/api/convert", async (req, res) => {
   const streamResult = async () => {
     const size = fs.statSync(outputPath).size;
     if (size < 128) throw new Error("MP3 output was empty");
+    const downloadFilename = timestampedDownloadFilename(audioTitle);
     res.status(200);
     res.set({
       "Content-Type": "audio/mpeg",
-      "Content-Disposition": 'attachment; filename="reeltone.mp3"',
+      "Content-Disposition": 'attachment; filename="' + downloadFilename + '"',
+      "X-ReelTone-Filename": downloadFilename,
       "Cache-Control": "no-store, private",
       "X-Content-Type-Options": "nosniff",
       "X-ReelTone-Quality": quality,
@@ -1040,6 +1090,42 @@ app.post("/api/convert", async (req, res) => {
   let extractorError: any = null;
 
   try {
+    publicFallback = await tryPublicHtmlToMp3(
+      validated.url,
+      directory,
+      outputPath,
+      quality,
+      fallbackController.signal,
+      (process) => { fallbackChild = process; }
+    );
+
+    if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
+      cleanup();
+      return;
+    }
+    if (publicFallback.reason === "instagram-rate-limited") {
+      const seconds = await registerSourceCooldown("instagram", publicFallback.retryAfterSeconds);
+      cleanup();
+      return sourceCooldownError(res, "instagram", seconds);
+    }
+    if (publicFallback.ok && fs.existsSync(outputPath)) {
+      await streamResult();
+      return;
+    }
+    if (publicFallback.reason === "duration-limit") {
+      cleanup();
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" });
+    }
+    if (publicFallback.reason === "media-too-large") {
+      cleanup();
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
+    }
+    if (["private-reel", "login-required", "reel-unavailable"].includes(publicFallback.reason)) {
+      cleanup();
+      const failure = classifyConversionFailure(publicFallback.reason + " " + String(publicFallback.diagnostic || ""));
+      return sendApiError(res, failure.status, failure.payload);
+    }
+
     const providerCooldown = await getSourceCooldownSeconds("easydown");
     providerFallback = providerCooldown > 0
       ? { ok: false, reason: "provider-cooldown", retryAfterSeconds: providerCooldown }
@@ -1083,18 +1169,24 @@ app.post("/api/convert", async (req, res) => {
     // Instagram can serve login/rate-limit walls to anonymous serverless IPs.
     // Resolve only the supplied public Reel URL, then download directly from an
     // allow-listed Instagram CDN host and encode the MP3 in this function.
-    const resolverCooldown = await getSourceCooldownSeconds("resolver");
-    if (resolverCooldown > 0) {
-      publicResolver = { ok: false, reason: "resolver-cooldown", retryAfterSeconds: resolverCooldown };
+    const resolverEndpoint = getConfiguredMediaResolverUrl();
+    if (!resolverEndpoint) {
+      publicResolver = { ok: false, reason: "resolver-not-configured" };
     } else {
-      publicResolver = await tryPublicResolverToMp3(
-        validated.url,
-        directory,
-        outputPath,
-        quality,
-        fallbackController.signal,
-        (process) => { fallbackChild = process; }
-      );
+      const resolverCooldown = await getSourceCooldownSeconds("resolver");
+      if (resolverCooldown > 0) {
+        publicResolver = { ok: false, reason: "resolver-cooldown", retryAfterSeconds: resolverCooldown };
+      } else {
+        publicResolver = await tryPublicResolverToMp3(
+          validated.url,
+          directory,
+          outputPath,
+          quality,
+          fallbackController.signal,
+          (process) => { fallbackChild = process; },
+          resolverEndpoint
+        );
+      }
     }
 
     if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
@@ -1123,56 +1215,9 @@ app.post("/api/convert", async (req, res) => {
       cleanup();
       return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
     }
-    console.warn("ReelTone public resolver fallback failed:", String(publicResolver.reason || "unknown").slice(0, 80));
+    if (resolverEndpoint) console.warn("ReelTone optional resolver fallback failed:", String(publicResolver.reason || "unknown").slice(0, 80));
 
-    // Next use public Reel HTML when it exposes a CDN media URL.
-    // This avoids depending solely on yt-dlp's Instagram extractor.
-    publicFallback = await tryPublicHtmlToMp3(
-      validated.url,
-      directory,
-      outputPath,
-      quality,
-      fallbackController.signal,
-      (process) => { fallbackChild = process; }
-    );
-
-    if (clientDisconnected || res.destroyed) {
-      cleanup();
-      return;
-    }
-
-    if (publicFallback.reason === "instagram-rate-limited") {
-      const seconds = await registerSourceCooldown("instagram", publicFallback.retryAfterSeconds);
-      cleanup();
-      return sourceCooldownError(res, "instagram", seconds);
-    }
-    if (publicFallback.ok && fs.existsSync(outputPath)) {
-      await streamResult();
-      return;
-    }
-    console.warn(
-      "ReelTone public fallback failed:",
-      String(publicFallback.reason || "unknown").slice(0, 80),
-      String(publicFallback.diagnostic || "").slice(0, 250)
-    );
-
-    if (publicFallback.reason === "duration-limit") {
-      cleanup();
-      return sendApiError(res, 413, { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" });
-    }
-    if (publicFallback.reason === "media-too-large") {
-      cleanup();
-      return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
-    }
-    if (["private-reel", "login-required", "reel-unavailable"].includes(publicFallback.reason)) {
-      cleanup();
-      const failure = classifyConversionFailure(publicFallback.reason + " " + String(publicFallback.diagnostic || ""));
-      return sendApiError(res, failure.status, failure.payload);
-    }
-    if (publicFallback.reason === "cancelled" || fallbackController.signal.aborted) {
-      cleanup();
-      return;
-    }
+    // Direct Instagram page/embed parsing has already run before optional providers.
 
     timeout = setTimeout(() => {
       timedOut = true;

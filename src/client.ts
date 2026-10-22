@@ -376,7 +376,11 @@ const byId = <T extends HTMLElement>(id: string): T => {
       .replace(/^-+|-+$/g, "")
       .slice(0, 70)
       .toLowerCase();
-    return (normalized || "reeltone") + ".mp3";
+    const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    const random = new Uint8Array(4);
+    crypto.getRandomValues(random);
+    const suffix = Array.from(random, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return (normalized || "reeltone") + "-" + timestamp + "-" + suffix + ".mp3";
   }
 
   function formatBytes(bytes: number) {
@@ -447,7 +451,10 @@ const byId = <T extends HTMLElement>(id: string): T => {
       const encodedAuthor = response.headers.get("X-ReelTone-Author");
       audioTitle = encodedTitle ? decodeURIComponent(encodedTitle) : "";
       audioAuthor = encodedAuthor ? decodeURIComponent(encodedAuthor) : "";
-      audioDownloadName = makeDownloadName(audioTitle);
+      const serverFilename = response.headers.get("X-ReelTone-Filename") || "";
+      audioDownloadName = /^[a-z0-9-]{1,120}\.mp3$/i.test(serverFilename)
+        ? serverFilename
+        : makeDownloadName(audioTitle);
       const blob = await response.blob();
       if (!blob.size) {
         showError("The MP3 was empty", "Try another public Reel link.", "CONVERSION_FAILED");
