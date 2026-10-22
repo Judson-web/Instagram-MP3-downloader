@@ -98,6 +98,7 @@
 
   function showError(title, message) {
     stopProgress();
+    form.hidden = false;
     show(progressPanel, false);
     show(resultPanel, false);
     show(errorPanel, true);
