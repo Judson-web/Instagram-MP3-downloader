@@ -49,11 +49,8 @@ app.use(helmet({
 }));
 app.use(express.json({ limit: "12kb", strict: true }));
 
-// Vercel serves files under /public through its CDN. Keep Express static
-// serving for local development and Docker use.
-if (!process.env.VERCEL) {
-  app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true }));
-}
+// Serve public assets in both Vercel and local deployments.
+app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true }));
 
 function clientKey(req) {
   return String(req.ip || req.socket.remoteAddress || "unknown").slice(0, 100);
@@ -286,10 +283,7 @@ app.post("/api/convert", async (req, res) => {
 });
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "API endpoint not found." }));
-app.get("*", (_req, res) => {
-  if (!process.env.VERCEL) return res.sendFile(path.join(__dirname, "public", "index.html"));
-  return res.status(404).send("Not found");
-});
+app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 app.use((err, _req, res, _next) => {
   if (res.headersSent) return;
