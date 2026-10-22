@@ -380,9 +380,15 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
   const inputPath = path.join(directory, "source.mp4");
   try {
     const canonical = new URL(sourceUrl);
-    const embedPath = canonical.pathname.replace(/\/+$/, "") + "/embed/captioned/";
+    const canonicalPath = canonical.pathname.replace(/\/+$/, "");
+    const shortCode = canonicalPath.match(/^\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)$/i)?.[1];
     const pageCandidates = [
-      "https://www.instagram.com" + embedPath,
+      "https://www.instagram.com" + canonicalPath + "/embed/",
+      "https://www.instagram.com" + canonicalPath + "/embed/captioned/",
+      ...(shortCode ? [
+        "https://www.instagram.com/p/" + shortCode + "/embed/",
+        "https://www.instagram.com/p/" + shortCode + "/embed/captioned/"
+      ] : []),
       sourceUrl
     ];
 
@@ -394,7 +400,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
     // The embed route can expose a public post's media metadata even when
     // the normal page responds with a login wall to datacenter requests.
     for (const pageUrl of pageCandidates) {
-      const pageLabel = pageUrl === pageCandidates[0] ? "embed" : "page";
+      const pageLabel = pageUrl.includes("/embed/") ? (pageUrl.includes("captioned") ? "embed-captioned" : "embed") : "page";
       let pageResponse;
       try {
         pageResponse = await fetch(pageUrl, {
