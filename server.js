@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { spawn } = require("node:child_process");
 const { pipeline } = require("node:stream/promises");
 const { Readable, Transform } = require("node:stream");
 const youtubeDl = require("youtube-dl-exec");
