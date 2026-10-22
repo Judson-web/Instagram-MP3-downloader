@@ -533,6 +533,11 @@ app.post("/api/convert", async (req, res) => {
       await streamResult();
       return;
     }
+    console.warn(
+      "ReelTone public fallback failed:",
+      String(publicFallback.reason || "unknown").slice(0, 80),
+      String(publicFallback.diagnostic || "").slice(0, 250)
+    );
 
     if (publicFallback.reason === "duration-limit") {
       cleanup();
