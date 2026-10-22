@@ -106,7 +106,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
   }
 
   function chooseQuality(value: string) {
-    if (!["128", "192", "320"].includes(value)) return;
+    if (!["128", "192", "256", "320"].includes(value)) return;
     qualityInput.value = value;
     syncQualityOptions();
     closeQualityList(false);

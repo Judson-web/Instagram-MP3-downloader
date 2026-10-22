@@ -13,21 +13,33 @@
   <meta property="og:locale" content="en_IN">
   <meta property="og:title" content="Instagram Reel to MP3 Converter | ReelTone">
   <meta property="og:description" content="Convert publicly accessible Instagram Reels to MP3. Choose your bitrate and download the audio without signing in.">
-  <meta name="twitter:card" content="summary">
+  <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Instagram Reel to MP3 Converter | ReelTone">
   <meta name="twitter:description" content="Convert publicly accessible Instagram Reels to MP3 with bitrate options and temporary downloads.">
   <meta property="og:type" content="website">
+  <meta property="og:image" content="https://instagram-mp3-downloader.vercel.app/og-card.png">
+  <meta property="og:image:secure_url" content="https://instagram-mp3-downloader.vercel.app/og-card.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="ReelTone. Keep the sound. Lose the scroll. Convert public Instagram Reels to MP3.">
+  <meta name="twitter:image" content="https://instagram-mp3-downloader.vercel.app/og-card.png">
+  <meta name="twitter:image:alt" content="ReelTone. Keep the sound. Lose the scroll. Convert public Instagram Reels to MP3.">
+  <meta name="application-name" content="ReelTone">
+  <meta name="apple-mobile-web-app-title" content="ReelTone">
+  <meta name="format-detection" content="telephone=no">
   <title>Instagram Reel to MP3 Converter | ReelTone</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%2320231f'/%3E%3Cpath d='M9 22h4l3-9 5 17 4-13 3 5h3' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/styles.css?v=7">
-  <script src="/app.js?v=6" defer></script>
+  <link rel="stylesheet" href="/styles.css?v=8">
+  <script src="/app.js?v=8" defer></script>
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
     "@type": "WebApplication",
     "name": "ReelTone",
     "url": "https://instagram-mp3-downloader.vercel.app/",
-    "description": "Convert publicly accessible Instagram Reels and video posts into MP3 audio with a choice of bitrates.",
+    "description": "Convert publicly accessible Instagram Reels and video posts into MP3 audio at 128, 192, 256, or 320 kbps.",
+    "image": "https://instagram-mp3-downloader.vercel.app/og-card.png",
     "applicationCategory": "MultimediaApplication",
     "operatingSystem": "Any",
     "browserRequirements": "Requires JavaScript and a modern web browser",
@@ -102,7 +114,7 @@
         <p class="hero-subtitle">Convert a public Instagram Reel to MP3 in a few steps. No account needed.</p>
 
         <div class="trust-row" aria-label="Converter details">
-          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>128 / 192 / 320 kbps</span>
+          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>128 / 192 / 256 / 320 kbps</span>
           <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>10-minute downloads</span>
         </div>
       </div>
@@ -136,9 +148,10 @@
                 <svg class="quality-chevron" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m5 7.5 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
               <div class="quality-options" id="quality-options" role="listbox" aria-labelledby="quality-label" hidden>
-                <button class="quality-option" type="button" role="option" data-quality="128" aria-selected="false" tabindex="-1"><span>128 kbps</span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-                <button class="quality-option" type="button" role="option" data-quality="192" aria-selected="true" tabindex="-1"><span>192 kbps</span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-                <button class="quality-option" type="button" role="option" data-quality="320" aria-selected="false" tabindex="-1"><span>320 kbps</span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
+                <button class="quality-option" type="button" role="option" data-quality="128" aria-selected="false" tabindex="-1"><span><strong>128 kbps</strong><small>Smaller file</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
+                <button class="quality-option" type="button" role="option" data-quality="192" aria-selected="true" tabindex="-1"><span><strong>192 kbps</strong><small>Balanced quality</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
+                <button class="quality-option" type="button" role="option" data-quality="256" aria-selected="false" tabindex="-1"><span><strong>256 kbps</strong><small>High quality</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
+                <button class="quality-option" type="button" role="option" data-quality="320" aria-selected="false" tabindex="-1"><span><strong>320 kbps</strong><small>Highest bitrate</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
               </div>
             </div>
             <span class="visually-hidden" id="quality-status" role="status" aria-live="polite"></span>

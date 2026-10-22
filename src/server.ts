@@ -20,7 +20,7 @@ const PORT = Number(process.env.PORT || 3000);
 const MAX_DURATION_SECONDS = 20 * 60;
 const MAX_REQUESTS_PER_HOUR = 8;
 const PROCESS_TIMEOUT_MS = 50 * 1000;
-const QUALITY_PRESETS = new Set(["128", "192", "320"]);
+const QUALITY_PRESETS = new Set(["128", "192", "256", "320"]);
 const ALLOWED_HOSTS = new Set([
   "instagram.com",
   "www.instagram.com",
@@ -202,8 +202,14 @@ function getSql() {
 }
 
 function makeIpHash(ip) {
-  const secret = process.env.RATE_LIMIT_SECRET || "reeltone-local-rate-limit";
-  return crypto.createHmac("sha256", secret).update(ip).digest("hex");
+  const configuredSecret = process.env.RATE_LIMIT_SECRET;
+  if (process.env.NODE_ENV === "production" &&
+      (!configuredSecret || Buffer.byteLength(configuredSecret, "utf8") < 32)) {
+    throw new Error("RATE_LIMIT_SECRET must be configured with at least 32 bytes in production");
+  }
+  const secret = configuredSecret || "reeltone-local-rate-limit";
+  // HMAC-SHA-256 is a keyed one-way pseudonym for rate limiting, not a password hash.
+  return crypto.createHmac("sha256", secret).update(ip, "utf8").digest("hex");
 }
 
 async function checkRateLimit(ip) {
@@ -838,7 +844,7 @@ app.post("/api/convert", async (req, res) => {
 
   const quality = String(req.body?.quality || "192");
   if (!QUALITY_PRESETS.has(quality)) {
-    return sendApiError(res, 400, { code: "INVALID_QUALITY", title: "Choose an audio quality", error: "Select 128, 192, or 320 kbps, then start the conversion again.", retryable: false, category: "input" });
+    return sendApiError(res, 400, { code: "INVALID_QUALITY", title: "Choose an audio quality", error: "Select 128, 192, 256, or 320 kbps, then start the conversion again.", retryable: false, category: "input" });
   }
 
   if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {

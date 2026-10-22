@@ -513,3 +513,14 @@ input, textarea, [contenteditable="true"], [contenteditable=""] { -webkit-user-s
   .hero-copy, .converter-card { width: 100%; min-width: 0; }
   .converter-card { grid-column: 1; grid-row: 2; }
 }
+
+/* Concise bitrate descriptions, retaining a compact popover. */
+.quality-options { width: min(204px, calc(100vw - 48px)); max-height: min(202px, 36vh); }
+.quality-option { min-height: 39px; padding: 6px 9px; }
+.quality-option > span:first-child { display: grid; gap: 2px; }
+.quality-option strong { font-size: 11px; line-height: 1.2; }
+.quality-option small { display: block; color: var(--muted); font-size: 9px; font-weight: 500; line-height: 1.15; }
+@media (max-width: 560px) {
+  .header-link { display: none; }
+  .quality-options { width: min(204px, calc(100vw - 48px)); max-height: min(202px, 36vh); }
+}
