@@ -392,6 +392,7 @@ h1 span { color: var(--accent); }
 .quality-trigger:disabled { opacity:.6; cursor:not-allowed; }
 .quality-chevron { width:14px; height:14px; color:var(--muted); transition:transform .16s; }
 .quality-select.is-open .quality-chevron { transform:rotate(180deg); }
+.quality-select.opens-up .quality-options { top:auto; bottom:calc(100% + 7px); }
 .quality-options {
   position:absolute; z-index:30; top:calc(100% + 7px); right:0; width:min(265px,calc(100vw - 48px));
   padding:5px; border:1px solid var(--border); border-radius:12px; background:var(--surface);

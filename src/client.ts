@@ -93,6 +93,9 @@ const byId = <T extends HTMLElement>(id: string): T => {
 
   function openQualityList(focusSelected = true) {
     if (busy) return;
+    const pickerBounds = qualityPicker.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - pickerBounds.bottom;
+    qualityPicker.classList.toggle("opens-up", spaceBelow < 240 && pickerBounds.top > spaceBelow);
     qualityOptions.hidden = false;
     qualityTrigger.setAttribute("aria-expanded", "true");
     qualityPicker.classList.add("is-open");
