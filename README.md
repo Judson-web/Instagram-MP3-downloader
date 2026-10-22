@@ -1,121 +1,72 @@
 # ReelTone
 
-**A focused, accessibility-minded way to turn publicly accessible Instagram videos into MP3 audio.**
+A focused web app for converting publicly accessible Instagram Reels and video posts into MP3 audio.
 
-[![Website status](https://img.shields.io/website?url=https%3A%2F%2Finstagram-mp3-downloader.vercel.app&label=website)](https://instagram-mp3-downloader.vercel.app/)
+[![Website](https://img.shields.io/website?url=https%3A%2F%2Finstagram-mp3-downloader.vercel.app&label=website)](https://instagram-mp3-downloader.vercel.app/)
 [![Service health](https://img.shields.io/endpoint?url=https%3A%2F%2Finstagram-mp3-downloader.vercel.app%2Fapi%2Fhealth%2Fbadge)](https://instagram-mp3-downloader.vercel.app/api/health)
 [![CI](https://github.com/Judson-web/Instagram-MP3-downloader/actions/workflows/ci.yml/badge.svg)](https://github.com/Judson-web/Instagram-MP3-downloader/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/github/license/Judson-web/Instagram-MP3-downloader)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-22.x-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.8%2B-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Hosted on Vercel](https://img.shields.io/badge/hosting-Vercel-black?logo=vercel&logoColor=white)](https://vercel.com/)
+[![TypeScript](https://img.shields.io/badge/source-TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node.js 22](https://img.shields.io/badge/Node.js-22-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Vercel](https://img.shields.io/badge/hosted%20on-Vercel-black?logo=vercel&logoColor=white)](https://vercel.com/)
 
-**Live application:** [instagram-mp3-downloader.vercel.app](https://instagram-mp3-downloader.vercel.app/)
-
-## Overview
-
-ReelTone is a responsive, URL-first audio converter. Paste a public Instagram Reel or video-post URL, select an MP3 bitrate, and download the resulting audio. An account or Instagram sign-in is not required.
-
-The interface includes a custom keyboard-accessible bitrate picker, persistent light/dark appearance, clear conversion and error states, and a temporary browser download URL that expires after ten minutes.
+**Live site:** https://instagram-mp3-downloader.vercel.app/
 
 ## Features
 
-- **Bitrate choices:** 128, 192, and 320 kbps.
-- **Temporary browser downloads:** a visible ten-minute countdown; browser object URLs are revoked when they expire, when another conversion begins, or when the page is left.
-- **Accessible interactions:** custom listbox with keyboard navigation, visible focus styles, skip link, semantic landmarks, descriptive labels, and reduced-motion support.
-- **Theme preference:** light and dark modes, respects the operating-system preference on first visit, and saves the user's choice locally when browser storage is available.
-- **Clear failure states:** differentiates invalid links, explicitly private/login-gated content, rate limits, unavailable videos, and service errors where upstream signals allow.
-- **Defensive media processing:** URL validation, media-host allow-listing, request limits, video-size and duration bounds, processing timeouts, and temporary-file cleanup.
-- **Search and social metadata:** canonical URL, Open Graph and Twitter metadata, and Schema.org application/FAQ structured data.
-- **Operational visibility:** live website status, an application/database health badge, and a GitHub Actions build check.
-
-## How it works
-
-1. The browser validates the URL format and sends it to the TypeScript API.
-2. The service attempts to retrieve media that is publicly accessible, then encodes the audio as MP3 using FFmpeg.
-3. The MP3 is returned in the conversion response. The browser holds the result in memory and creates a temporary object URL for download.
-4. After ten minutes, the object URL is revoked. A copy already saved to a user's device is not remotely deleted.
-
-When public media metadata cannot be retrieved directly, ReelTone may submit the public post URL to a third-party resolver. Media downloads are restricted to known Instagram CDN hostnames. This resolver is an external dependency, so its availability and behavior can change.
+- Convert publicly accessible Reel and video-post URLs into MP3.
+- Choose 128, 192, or 320 kbps.
+- Custom compact bitrate picker with keyboard navigation.
+- Light and dark themes with a remembered preference.
+- Temporary browser download that expires after ten minutes.
+- Clear, specific messages for invalid or unavailable links.
+- Responsive desktop and mobile layouts.
+- Search metadata, social sharing metadata, and structured data.
+- Application health endpoint and live status badge.
 
 ## Technology
 
-| Area | Technology |
-| --- | --- |
-| Application source | TypeScript |
-| Server | Node.js 22, Express |
-| Audio conversion | FFmpeg, ffmpeg-static |
-| Extraction fallback | youtube-dl-exec / yt-dlp |
-| Persistent request limits | Neon Postgres |
-| Hosting | Vercel |
-| Quality checks | TypeScript compiler, GitHub Actions |
+- **Application:** TypeScript, Node.js, Express
+- **Audio:** FFmpeg and yt-dlp tooling
+- **Database:** Neon Postgres
+- **Deployment:** Vercel
+- **Checks:** TypeScript compiler and GitHub Actions
 
-TypeScript is the maintained application source. Runtime JavaScript is generated by the build for Node.js and browsers; generated bundles are excluded from Git and should not be edited by hand.
+TypeScript is the maintained application source. JavaScript runtime bundles are generated during the build and excluded from source control.
 
 ## Local development
 
-Requirements: Node.js 22 or later and network access for dependency installation.
+Requirements: Node.js 22 or later and a Neon Postgres database.
 
-1. Clone this repository and install dependencies with npm install.
-2. Configure a dedicated Neon Postgres connection in the DATABASE_URL environment variable.
-3. Set RATE_LIMIT_SECRET to a long, random value so visitor identifiers can be HMAC-hashed for rate limiting.
-4. Configure the platform-specific yt-dlp settings for your deployment environment, if applicable.
-5. Run npm run check to type-check the TypeScript source.
-6. Run npm run build to compile the server and browser code.
-7. Run npm start and visit http://localhost:3000.
+1. Clone this repository.
+2. Install dependencies with `npm install`.
+3. Set `DATABASE_URL` to your Neon connection string.
+4. Set `RATE_LIMIT_SECRET` to a strong random value.
+5. Run `npm run check` to type-check the application.
+6. Run `npm run build` to compile the TypeScript runtime files.
+7. Run `npm start` and open http://localhost:3000.
 
-For local experiments only, if DATABASE_URL is omitted, the application has an in-memory rate-limiting fallback. A deployed environment should use its dedicated database.
+Keep environment files and secret values out of Git. Configure deployment variables through the hosting provider's environment settings.
 
-## Configuration
+## Health and API
 
-Set configuration in the hosting provider's environment-variable manager. Never commit credentials, connection strings, resolver tokens, or local environment files.
+- **Website availability:** measured by the website badge above.
+- **Application/database health:** [`/api/health`](https://instagram-mp3-downloader.vercel.app/api/health).
+- **Badge data:** [`/api/health/badge`](https://instagram-mp3-downloader.vercel.app/api/health/badge).
+- **Build workflow:** [GitHub Actions](https://github.com/Judson-web/Instagram-MP3-downloader/actions/workflows/ci.yml).
 
-| Variable | Purpose |
-| --- | --- |
-| DATABASE_URL | Neon Postgres connection string |
-| RATE_LIMIT_SECRET | Secret used when hashing visitor identifiers for rate limits |
-| YOUTUBE_DL_FILENAME | Optional platform-specific yt-dlp executable selection |
-| YOUTUBE_DL_SKIP_PYTHON_CHECK | Optional yt-dlp runtime compatibility setting |
+The service health check confirms the app can connect to its database. It does not guarantee that the upstream social-media source is available.
 
-Do not paste secret values into issues, pull requests, screenshots, or source control.
+## Security
 
-## Service monitoring
+The deployment applies a restrictive Content Security Policy, HTTPS transport policy, anti-framing controls, MIME-sniffing protection, a restrictive Permissions Policy, and cross-origin response policies. The server also validates submitted URLs and constrains media processing.
 
-- **Website status badge:** checks whether the public homepage responds.
-- **Service health badge:** checks the application and verifies that the configured database can execute a simple query.
-- **Health endpoint:** [GET /api/health](https://instagram-mp3-downloader.vercel.app/api/health) returns machine-readable service and database status.
-- **CI:** the GitHub Actions workflow type-checks TypeScript and builds the generated runtime outputs.
+These safeguards reduce exposure but cannot make a public website perfectly secure. Keep dependencies updated and review configuration changes before deploying.
 
-The health badge is cached by the badge provider, so it can briefly lag behind an incident. It is an availability signal, not a guarantee that Instagram or an upstream media resolver is operating normally.
+## Responsible use
 
-## API
-
-### GET /api/health
-
-Checks application configuration and database connectivity. Returns JSON with an ok flag and service/database state.
-
-### POST /api/convert
-
-Accepts JSON containing a public Instagram URL and one supported bitrate. For example:
-
-    {
-      "url": "https://www.instagram.com/reel/SHORTCODE/",
-      "quality": "192"
-    }
-
-On success, the response content type is audio/mpeg. On failure, the API returns a JSON error with a code, title, description, retryability, and category.
-
-Operational limits include a maximum video duration of 20 minutes, a 150 MiB source-media cap, eight attempts per visitor per hour, and bounded processing timeouts.
-
-## Privacy and responsible use
-
-- ReelTone does not ask for Instagram passwords or account cookies.
-- Request-limit records store HMAC-hashed visitor identifiers rather than raw IP addresses.
-- Converted MP3s are not retained as a permanent media library in the database.
-- A third-party resolver can receive the public post URL when it is needed to find media metadata.
-- Private, removed, login-gated, age-restricted, region-restricted, or temporarily unavailable posts may not be convertible.
-- Download only content you own or are authorized to use. ReelTone is independent and is not affiliated with Instagram or Meta.
+Use public links only. Private or login-gated media may not be available. Download or reuse audio only when you have permission to do so. ReelTone is an independent project and is not affiliated with Instagram or Meta.
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+ReelTone is distributed under the [Apache License 2.0](LICENSE).

@@ -2,7 +2,7 @@
   "name": "instagram-mp3-downloader",
   "version": "2.0.0",
   "private": true,
-  "description": "An accessible Instagram Reel to MP3 converter with temporary browser downloads.",
+  "description": "An Instagram Reel to MP3 converter with temporary browser downloads.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
