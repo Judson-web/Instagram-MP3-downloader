@@ -30,7 +30,7 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 - **Audio:** FFmpeg and yt-dlp tooling
 - **Database:** Neon Postgres
 - **Deployment:** Vercel
-- **Checks:** TypeScript compiler and GitHub Actions
+- **Checks:** TypeScript compiler, Node.js privacy unit tests, and GitHub Actions
 
 TypeScript is the maintained application source, including the preview-image build step. Browser and Node.js runtime JavaScript plus the PNG preview are generated during the build and excluded from source control.
 
@@ -43,8 +43,9 @@ Requirements: Node.js 22 or later and a Neon Postgres database.
 3. Set `DATABASE_URL` to your Neon connection string.
 4. Set `RATE_LIMIT_SECRET` to a cryptographically random value of at least 32 bytes.
 5. Run `npm run check` to type-check the application.
-6. Run `npm run build` to compile the TypeScript runtime files.
-7. Run `npm start` and open http://localhost:3000.
+6. Run `npm test` to verify IP anonymization behavior.
+7. Run `npm run build` to test and compile the TypeScript runtime files.
+8. Run `npm start` and open http://localhost:3000.
 
 Keep environment files and secret values out of Git. Configure deployment variables through the hosting provider's environment settings.
 

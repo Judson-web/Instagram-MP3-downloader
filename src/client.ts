@@ -298,7 +298,8 @@ const byId = <T extends HTMLElement>(id: string): T => {
     if (cooldownCodes.includes(code) && Number(payload.retryAfterSeconds) > 0) {
       const seconds = Math.max(1, Math.ceil(Number(payload.retryAfterSeconds)));
       const minutes = Math.ceil(seconds / 60);
-      message += " Retry is paused for about " + (minutes <= 1 ? "one minute." : minutes + " minutes.") + " The retry button will unlock when the cooldown ends.";
+      const delayText = seconds < 60 ? seconds + (seconds === 1 ? " second." : " seconds.") : (minutes <= 1 ? "one minute." : minutes + " minutes.");
+      message += " Retry is paused for about " + delayText + " The retry button will unlock when the cooldown ends.";
       startRetryCountdown(seconds);
     }
     showError(

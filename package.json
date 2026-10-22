@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node server.js",
     "check": "tsc --noEmit -p tsconfig.json",
-    "build": "npm run check && tsc -p tsconfig.json && node dist/generate-og-card.js && cp dist/server.js server.js && cp dist/client.js public/app.js"
+    "build": "npm run check && tsc -p tsconfig.json && node --test dist/ip-anonymization.test.js && node dist/generate-og-card.js && cp dist/server.js server.js && cp dist/client.js public/app.js",
+    "test": "npm run check && tsc -p tsconfig.json && node --test dist/ip-anonymization.test.js"
   },
   "engines": {
     "node": "22.x"
