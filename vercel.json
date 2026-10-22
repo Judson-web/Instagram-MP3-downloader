@@ -3,10 +3,7 @@
   "functions": {
     "server.js": {
       "maxDuration": 300,
-      "includeFiles": [
-        "node_modules/ffmpeg-static/ffmpeg",
-        "node_modules/youtube-dl-exec/bin/yt-dlp_linux"
-      ]
+      "includeFiles": "node_modules/**/*"
     }
   },
   "headers": [
