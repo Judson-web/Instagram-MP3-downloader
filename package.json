@@ -10,7 +10,7 @@
     "build": "npm run check"
   },
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "dependencies": {
     "@neondatabase/serverless": "1.0.2",
@@ -18,5 +18,9 @@
     "ffmpeg-static": "5.2.0",
     "helmet": "8.1.0",
     "youtube-dl-exec": "3.1.17"
+  },
+  "allowScripts": {
+    "youtube-dl-exec@3.1.17": true,
+    "ffmpeg-static@5.2.0": true
   }
 }
