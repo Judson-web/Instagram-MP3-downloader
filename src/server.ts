@@ -50,6 +50,14 @@ interface PublicResolverPayload {
   ok?: boolean; platform?: string; code?: string; error?: string; message?: string;
   title?: string; author?: string; duration?: number | string; media?: ResolverMediaItem[];
 }
+interface ConversionAttempt {
+  ok: boolean;
+  reason: string;
+  detail?: string;
+  diagnostic?: string;
+  title?: string;
+  author?: string;
+}
 
 function sendApiError(res: Response, status: number, payload: ApiErrorPayload): Response {
   res.set("Cache-Control", "no-store");
@@ -435,7 +443,7 @@ async function encodeDownloadedVideo(inputPath, outputPath, quality, signal, set
   });
 }
 
-async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess) {
+async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess): Promise<ConversionAttempt> {
   const inputPath = path.join(directory, "resolver-source.mp4");
   try {
     const resolverUrl = new URL("https://weirddl.sbs/api/info");
@@ -529,7 +537,7 @@ async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality,
   }
 }
 
-async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess) {
+async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess): Promise<ConversionAttempt> {
   const inputPath = path.join(directory, "source.mp4");
   try {
     const canonical = new URL(sourceUrl);
@@ -663,7 +671,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
   }
 }
 
-async function tryEasyDownToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess) {
+async function tryEasyDownToMp3(sourceUrl, directory, outputPath, quality, parentSignal, setProcess): Promise<ConversionAttempt> {
   const token = process.env.EASYDOWN_API_TOKEN;
   if (!token) return { ok: false, reason: "provider-not-configured" };
 
@@ -833,8 +841,9 @@ app.post("/api/convert", async (req, res) => {
     }
   };
 
-  let publicFallback = { ok: false, reason: "not-attempted" };
-  let extractorError = null;
+  let publicFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
+  let publicResolver: ConversionAttempt = { ok: false, reason: "not-attempted" };
+  let extractorError: any = null;
 
   try {
     const providerFallback = await tryEasyDownToMp3(
@@ -869,7 +878,7 @@ app.post("/api/convert", async (req, res) => {
     // Instagram can serve login/rate-limit walls to anonymous serverless IPs.
     // Resolve only the supplied public Reel URL, then download directly from an
     // allow-listed Instagram CDN host and encode the MP3 in this function.
-    const publicResolver = await tryPublicResolverToMp3(
+    publicResolver = await tryPublicResolverToMp3(
       validated.url,
       directory,
       outputPath,
