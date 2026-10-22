@@ -64,7 +64,7 @@ interface ConversionAttempt {
 }
 type MediaAssetAttempt =
   | { ok: true; response: globalThis.Response; url: string; contentLength: number }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; retryAfterSeconds?: number };
 
 function sendApiError(res: Response, status: number, payload: ApiErrorPayload): Response {
   res.set("Cache-Control", "no-store");
@@ -547,7 +547,7 @@ async function fetchInstagramMediaAsset(rawUrl, parentSignal): Promise<MediaAsse
 
     if (response.status === 429) {
       await response.body?.cancel().catch(() => {});
-      return { ok: false, reason: "instagram-rate-limited", retryAfterSeconds: parseRetryAfterSeconds(response.headers.get("retry-after")) } as any;
+      return { ok: false, reason: "instagram-rate-limited", retryAfterSeconds: parseRetryAfterSeconds(response.headers.get("retry-after")) };
     }
     if (!response.ok || !response.body) {
       await response.body?.cancel().catch(() => {});
@@ -685,7 +685,7 @@ async function tryPublicResolverToMp3(sourceUrl, directory, outputPath, quality,
     if (duration > MAX_DURATION_SECONDS) return { ok: false, reason: "duration-limit" };
 
     const media = await fetchInstagramMediaAsset(selected.url, parentSignal);
-    if ("reason" in media) return { ok: false, reason: media.reason || "media-not-public" };
+    if ("reason" in media) return { ok: false, reason: media.reason || "media-not-public", retryAfterSeconds: media.retryAfterSeconds };
     if (media.contentLength > MAX_SOURCE_BYTES) {
       await media.response.body?.cancel().catch(() => {});
       return { ok: false, reason: "media-too-large" };
@@ -852,7 +852,7 @@ async function tryPublicHtmlToMp3(sourceUrl, directory, outputPath, quality, par
     if (!selected) return { ok: false, reason: lastReason, diagnostic: pageDiagnostics.join(",").slice(0, 300) };
 
     const media = await fetchInstagramMediaAsset(selected.url, parentSignal);
-    if ("reason" in media) return { ok: false, reason: media.reason || "media-not-public" };
+    if ("reason" in media) return { ok: false, reason: media.reason || "media-not-public", retryAfterSeconds: media.retryAfterSeconds };
 
     let totalBytes = 0;
     const limiter = new Transform({
