@@ -131,7 +131,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'none'"],
-      scriptSrc: ["'self'", (_req: Request, res: Response) => "'nonce-" + res.locals.cspNonce + "'"],
+      scriptSrc: ["'self'", (_req, res) => "'nonce-" + (res as unknown as Response).locals.cspNonce + "'"],
       styleSrc: ["'self'"],
       imgSrc: ["'self'", "data:"],
       fontSrc: ["'self'"],
@@ -257,12 +257,12 @@ async function getSourceCooldownSeconds(source: SourceCooldownKey): Promise<numb
     const current = localSourceCooldowns.get(source);
     return current ? Math.max(0, Math.ceil((current.until - Date.now()) / 1000)) : 0;
   }
-  const rows = await sql`
+  const rows = await (sql`
     SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM (cooldown_until - now()))))::int AS remaining_seconds
     FROM reeltone_source_cooldowns
     WHERE cooldown_key = ${source} AND cooldown_until > now()
     LIMIT 1
-  `;
+  ` as unknown as Promise<Array<{ remaining_seconds: number }>>);
   return Math.min(MAX_SOURCE_COOLDOWN_SECONDS, Math.max(0, Number(rows[0]?.remaining_seconds || 0)));
 }
 
@@ -279,12 +279,12 @@ async function registerSourceCooldown(source: SourceCooldownKey, retryAfterSecon
     return Math.max(1, Math.ceil((localSourceCooldowns.get(source)!.until - Date.now()) / 1000));
   }
 
-  const existing = await sql`
+  const existing = await (sql`
     SELECT strike_count, (cooldown_until > now()) AS active
     FROM reeltone_source_cooldowns
     WHERE cooldown_key = ${source}
     LIMIT 1
-  `;
+  ` as unknown as Promise<Array<{ strike_count: number; active: boolean }>>);
   const oldStrikeCount = Number(existing[0]?.strike_count || 0);
   const stillActive = existing[0]?.active === true;
   const strikeCount = oldStrikeCount === 0 ? 1 : (stillActive ? oldStrikeCount : Math.min(8, oldStrikeCount + 1));
@@ -331,13 +331,13 @@ async function checkRateLimit(ip: string): Promise<boolean> {
     requestsByIp.set(ipHash, recent);
     return true;
   }
-  const rows = await sql`
+  const rows = await (sql`
     INSERT INTO conversion_usage (ip_hash, window_start, request_count)
     VALUES (${ipHash}, date_trunc('hour', now()), 1)
     ON CONFLICT (ip_hash, window_start)
     DO UPDATE SET request_count = conversion_usage.request_count + 1
     RETURNING request_count
-  `;
+  ` as unknown as Promise<Array<{ request_count: number }>>);
 
   localRequestCounter += 1;
   if (localRequestCounter % 40 === 0) {
@@ -568,7 +568,7 @@ async function fetchInstagramMediaAsset(rawUrl: string, parentSignal: AbortSigna
 }
 
 async function encodeDownloadedVideo(inputPath: string, outputPath: string, quality: QualityPreset, signal: AbortSignal, setProcess: ProcessSetter): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     if (signal.aborted) {
       reject(new Error("conversion cancelled"));
       return;
@@ -602,14 +602,14 @@ async function encodeDownloadedVideo(inputPath: string, outputPath: string, qual
     const abortHandler = () => child.kill("SIGKILL");
     signal.addEventListener("abort", abortHandler, { once: true });
 
-    const finish = (error) => {
+    const finish = (error: Error | null): void => {
       if (finished) return;
       finished = true;
       clearTimeout(timeout);
       signal.removeEventListener("abort", abortHandler);
       setProcess(null);
       if (error) reject(error);
-      else resolve(true);
+      else resolve();
     };
 
     child.stderr.on("data", (chunk) => {
@@ -928,9 +928,9 @@ async function tryEasyDownToMp3(sourceUrl: string, directory: string, outputPath
     const duration = Number(media.duration || 0);
     if (duration > MAX_DURATION_SECONDS) return { ok: false, reason: "duration-limit" };
 
-    const candidates = [
-      ...(Array.isArray(media.audios) ? media.audios : []),
-      ...(Array.isArray(media.videos) ? media.videos.filter((item) => item?.hasAudio !== false) : [])
+    const candidates: Array<{ url?: string; hasAudio?: boolean }> = [
+      ...(Array.isArray(media.audios) ? media.audios as Array<{ url?: string; hasAudio?: boolean }> : []),
+      ...(Array.isArray(media.videos) ? (media.videos as Array<{ url?: string; hasAudio?: boolean }>).filter((item) => item.hasAudio !== false) : [])
     ];
     const chosen = candidates.find((item) => typeof item?.url === "string" && isAllowedMediaAsset(item.url));
     if (!chosen) return { ok: false, reason: "provider-no-media" };
@@ -1006,7 +1006,7 @@ app.get("/api/health/badge", async (_req: Request, res: Response) => {
 
 app.post("/api/convert", async (req: Request, res: Response) => {
   const validated = validateInstagramUrl(req.body?.url);
-  if (!validated.ok) return sendApiError(res, 400, { code: "INVALID_URL", title: "Check your Instagram link", error: validated.reason, retryable: false, category: "input" });
+  if (validated.ok === false) return sendApiError(res, 400, { code: "INVALID_URL", title: "Check your Instagram link", error: validated.reason, retryable: false, category: "input" });
 
   const requestedQuality = String(req.body?.quality || "192");
   if (!QUALITY_PRESETS.has(requestedQuality)) {
@@ -1246,10 +1246,10 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       windowsHide: true
     });
 
-    child.stderr?.on("data", (chunk) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       stderrTail = (stderrTail + chunk.toString()).slice(-8000);
     });
-    child.stdout?.on("data", (chunk) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       stdoutTail = (stdoutTail + chunk.toString()).slice(-3000);
     });
 

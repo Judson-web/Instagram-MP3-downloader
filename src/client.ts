@@ -71,7 +71,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
   let audioDownloadName = "reeltone.mp3";
   let cancelRequested = false;
 
-  function show(element, visible) {
+  function show(element: HTMLElement, visible: boolean): void {
     element.hidden = !visible;
   }
 
@@ -133,7 +133,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
     }
   }
 
-  function setBusy(value) {
+  function setBusy(value: boolean): void {
     busy = value;
     urlInput.disabled = value;
     qualityInput.disabled = value;
@@ -146,7 +146,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
     convertButton.querySelector(".button-label").textContent = value ? "Converting…" : "Convert to MP3";
   }
 
-  function validateUrl(value) {
+  function validateUrl(value: string): boolean {
     let parsed;
     try {
       parsed = new URL(value.trim());
@@ -200,7 +200,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
     resultExpiry.textContent = `Download link expires in ${minutes}:${seconds}.`;
   }
 
-  function showInputError(message) {
+  function showInputError(message: string): void {
     inputWrap.classList.add("invalid");
     urlInput.setAttribute("aria-invalid", "true");
     urlHint.textContent = message;
@@ -290,7 +290,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
     retryCountdownInterval = window.setInterval(update, 1000);
   }
 
-  function showApiError(payload: ApiError) {
+  function showApiError(payload: ApiError): void {
     const code = payload.code || "CONVERSION_FAILED";
     clearRetryCountdown();
     const cooldownCodes = ["INSTAGRAM_RATE_LIMITED", "RESOLVER_RATE_LIMITED", "PROVIDER_RATE_LIMITED"];
