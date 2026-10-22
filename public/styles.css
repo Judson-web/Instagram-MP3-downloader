@@ -520,7 +520,9 @@ input, textarea, [contenteditable="true"], [contenteditable=""] { -webkit-user-s
 .quality-option > span:first-child { display: grid; gap: 2px; }
 .quality-option strong { font-size: 11px; line-height: 1.2; }
 .quality-option small { display: block; color: var(--muted); font-size: 9px; font-weight: 500; line-height: 1.15; }
-@media (max-width: 560px) {
+@media (max-width: 920px) {
   .header-link { display: none; }
+}
+@media (max-width: 560px) {
   .quality-options { width: min(204px, calc(100vw - 48px)); max-height: min(202px, 36vh); }
 }
