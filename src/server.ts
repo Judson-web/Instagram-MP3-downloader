@@ -91,7 +91,7 @@ function classifyConversionFailure(evidence: string, timedOut = false): { status
     return { status: 404, payload: { code: "REEL_UNAVAILABLE", title: "This Reel could not be found", error: "The post may have been removed, the link may be mistyped, or Instagram may have stopped serving the media.", retryable: false, category: "availability" } };
   }
   if (/no-public-media|no-public-video-metadata|no media in embed payload|resolver-no-media|resolver-no-video|media-not-public|instagram-page-unavailable|extract_failed/.test(message)) {
-    return { status: 422, payload: { code: "NO_PUBLIC_MEDIA", title: "No publicly playable video was found", error: "Instagram did not expose a playable video to the converter. The Reel may be private, login-gated, age/region-restricted, removed, or temporarily unavailable. Instagram's response doesn't let us distinguish those cases reliably.", retryable: false, category: "privacy" } };
+    return { status: 422, payload: { code: "NO_PUBLIC_MEDIA", title: "No publicly playable video was found", error: "Instagram did not expose a playable video to the converter. The Reel may be private, login-gated, age/region-restricted, removed, or temporarily unavailable. Instagram's response doesn't let us distinguish those cases reliably.", retryable: false, category: "availability" } };
   }
   if (/resolver-(?:http|failed)|provider-not-configured|provider-no-media|provider-request-failed|dns|fetch failed|econnreset/.test(message)) {
     return { status: 503, payload: { code: "RESOLVER_UNAVAILABLE", title: "The media resolver is temporarily unavailable", error: "The link lookup service did not respond successfully. Try again in a little while.", retryable: true, category: "service" } };
@@ -870,11 +870,11 @@ app.post("/api/convert", async (req, res) => {
     }
     if (providerFallback.reason === "duration-limit") {
       cleanup();
-      return res.status(413).json({ error: "This Reel exceeds the 20-minute processing limit." });
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" });
     }
     if (providerFallback.reason === "media-too-large") {
       cleanup();
-      return res.status(413).json({ error: "This video file is too large for the online converter." });
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
     }
     if (process.env.EASYDOWN_API_TOKEN && providerFallback.reason !== "provider-no-media") {
       console.warn("ReelTone provider fallback failed:", String(providerFallback.reason || "unknown").slice(0, 80));
@@ -904,11 +904,11 @@ app.post("/api/convert", async (req, res) => {
     }
     if (publicResolver.reason === "duration-limit") {
       cleanup();
-      return res.status(413).json({ error: "This Reel exceeds the 20-minute processing limit." });
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" });
     }
     if (publicResolver.reason === "media-too-large") {
       cleanup();
-      return res.status(413).json({ error: "This video file is too large for the online converter." });
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
     }
     console.warn("ReelTone public resolver fallback failed:", String(publicResolver.reason || "unknown").slice(0, 80));
 
@@ -940,11 +940,11 @@ app.post("/api/convert", async (req, res) => {
 
     if (publicFallback.reason === "duration-limit") {
       cleanup();
-      return res.status(413).json({ error: "This Reel exceeds the 20-minute processing limit." });
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" });
     }
     if (publicFallback.reason === "media-too-large") {
       cleanup();
-      return res.status(413).json({ error: "This video file is too large for the online converter." });
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
     }
     if (publicFallback.reason === "cancelled" || fallbackController.signal.aborted) {
       cleanup();
