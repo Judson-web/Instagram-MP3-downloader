@@ -283,3 +283,22 @@ h1 span { color: transparent; background: linear-gradient(95deg, #bfa8ff 5%, #a9
   letter-spacing: .4px;
   font-size: 8px;
 }
+
+
+/* Result metadata and high-confidence error states */
+.result-author { display: block; margin-top: 1px; color: #8e88a1; font-size: 9px; overflow-wrap: anywhere; }
+.error-copy { display: grid; gap: 4px; }
+.error-category { display: inline-flex; align-items: center; width: fit-content; color: #d5baff; font-size: 8px; letter-spacing: 1.1px; font-weight: 800; margin-bottom: 2px; }
+.error-panel[data-kind="private"] { border-color: rgba(255, 190, 126, .24); background: linear-gradient(115deg, rgba(255, 190, 126, .055), rgba(10,9,16,.26)); }
+.error-panel[data-kind="private"] .error-icon { color: #ffc27e; border-color: rgba(255,194,126,.48); }
+.error-panel[data-kind="unavailable"] { border-color: rgba(255,152,143,.25); }
+.error-panel[data-kind="rate-limit"] { border-color: rgba(255,193,117,.3); background: rgba(255,193,117,.045); }
+.error-panel[data-kind="rate-limit"] .error-icon { color: #ffc175; border-color: rgba(255,193,117,.45); }
+.error-panel[data-kind="service"] { border-color: rgba(177,157,255,.3); background: rgba(177,157,255,.045); }
+.error-panel[data-kind="service"] .error-icon { color: var(--purple-bright); border-color: rgba(177,157,255,.45); }
+.error-panel[data-kind="input"] { border-color: rgba(177,157,255,.22); }
+.file-meta strong { overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .error-panel { flex-wrap: wrap; }
+  #retry-button { margin-left: 32px; }
+}
