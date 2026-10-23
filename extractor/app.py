@@ -229,7 +229,7 @@ def try_graphql_public_media(
             raise HTTPException(
                 status_code=503,
                 headers={"Retry-After": "30"},
-                detail={"code": "SOURCE_RATE_LIMITED", "error": "Instagram temporarily limited anonymous extraction."},
+                detail={"code": "GALLERY_DL_RATE_LIMITED", "error": "The independent Instagram gallery extractor was rate-limited."},
             )
         landing.raise_for_status()
 
@@ -757,7 +757,22 @@ def convert(
             # Default strategy: GraphQL first, then gallery-dl as an independent
             # parser for public posts whose metadata query is empty or stale.
             if shortcode:
-                info = try_graphql_public_media(source_url, shortcode, directory, payload.quality)
+                try:
+                    info = try_graphql_public_media(
+                        source_url, shortcode, directory, payload.quality
+                    )
+                except HTTPException as graph_error:
+                    detail = graph_error.detail if isinstance(graph_error.detail, dict) else {}
+                    if detail.get("code") != "SOURCE_RATE_LIMITED":
+                        raise
+                    # Give the current independent extractor one bounded chance:
+                    # gallery-dl's Instagram implementation uses a different
+                    # request path from the anonymous GraphQL helper.
+                    info = try_gallery_dl_public_media(
+                        source_url, shortcode, directory, payload.quality
+                    )
+                    if info is None:
+                        raise graph_error
             if info is None and shortcode:
                 info = try_gallery_dl_public_media(
                     source_url, shortcode, directory, payload.quality
