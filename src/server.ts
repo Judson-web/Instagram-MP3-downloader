@@ -2500,6 +2500,36 @@ app.get("/api/maintenance/purge-audio-cache", async (req: Request, res: Response
   const sdk = getPrivateBlobSdk();
   if (!sdk) return res.status(503).json({ error: "Private audio cache is not configured." });
 
+  // Authenticated diagnostic for validating the store credentials and private
+  // read/write path without calling Instagram or exposing cached media.
+  if (req.query.selfTest === "1") {
+    const testPath = AUDIO_CACHE_PREFIX + "/health/" + crypto.randomUUID() + ".txt";
+    try {
+      await sdk.put(testPath, "reeltone-cache-ok", {
+        access: "private",
+        contentType: "text/plain",
+        allowOverwrite: false,
+        cacheControlMaxAge: 60,
+        abortSignal: AbortSignal.timeout(5000)
+      });
+      const test = await sdk.get(testPath, {
+        access: "private",
+        abortSignal: AbortSignal.timeout(5000)
+      });
+      const body = test?.statusCode === 200 && test.stream
+        ? await privateBlobStreamToText(test.stream, 64)
+        : "";
+      await sdk.del(testPath, { access: "private" }).catch(() => {});
+      if (body !== "reeltone-cache-ok") {
+        return res.status(503).json({ ok: false, blobReadWrite: false });
+      }
+      return res.json({ ok: true, blobReadWrite: true, privateAccess: true, testObjectDeleted: true });
+    } catch {
+      await sdk.del(testPath, { access: "private" }).catch(() => {});
+      return res.status(503).json({ ok: false, blobReadWrite: false });
+    }
+  }
+
   let scanned = 0;
   let deleted = 0;
   let cursor: string | undefined;
