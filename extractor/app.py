@@ -466,6 +466,11 @@ def health():
         "ffmpegAvailable": shutil.which("ffmpeg") is not None,
         "instagrapiInstalled": importlib.util.find_spec("instagrapi") is not None,
         "instagrapiSessionConfigured": instagrapi_is_configured(),
+        "instagrapiAutoRenewConfigured": (
+            os.environ.get("INSTAGRAPI_AUTO_REAUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+            and bool(os.environ.get("INSTAGRAPI_USERNAME", "").strip())
+            and bool(os.environ.get("INSTAGRAPI_PASSWORD", ""))
+        ),
         "instagrapiAuthMode": instagrapi_status()[0],
         "instagrapiClientLoaded": instagrapi_status()[1],
         "instagrapiCooldownActive": instagrapi_status()[2],
@@ -617,8 +622,10 @@ def instagrapi_is_configured() -> bool:
         or INSTAGRAPI_SETTINGS_PATH.is_file()
     )
     sessionid_present = bool(os.environ.get("INSTAGRAPI_SESSIONID", "").strip())
+    auto_renew = os.environ.get("INSTAGRAPI_AUTO_REAUTH", "").strip().lower() in {"1", "true", "yes", "on"}
     credentials_present = bool(
-        os.environ.get("INSTAGRAPI_USERNAME", "").strip()
+        auto_renew
+        and os.environ.get("INSTAGRAPI_USERNAME", "").strip()
         and os.environ.get("INSTAGRAPI_PASSWORD", "")
     )
     return settings_present or sessionid_present or credentials_present
@@ -680,7 +687,7 @@ def _instagrapi_error_kind(error: Exception) -> str:
     return "unavailable"
 
 
-def _build_instagrapi_client():
+def _build_instagrapi_client(require_renewal: bool = False):
     """Load the best saved authorization and optionally let Instagrapi renew it.
 
     INSTAGRAPI_USERNAME/PASSWORD are optional Render secrets. When supplied with
@@ -702,7 +709,8 @@ def _build_instagrapi_client():
     settings_b64 = os.environ.get("INSTAGRAPI_SETTINGS_B64", "").strip()
     username = os.environ.get("INSTAGRAPI_USERNAME", "").strip()
     password = os.environ.get("INSTAGRAPI_PASSWORD", "")
-    has_credentials = bool(username and password)
+    auto_reauth = os.environ.get("INSTAGRAPI_AUTO_REAUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+    has_credentials = bool(auto_reauth and username and password)
     sessionid = os.environ.get("INSTAGRAPI_SESSIONID", "").strip()
     mode = "disabled"
 
@@ -719,23 +727,32 @@ def _build_instagrapi_client():
     elif INSTAGRAPI_SETTINGS_PATH.is_file():
         client.load_settings(str(INSTAGRAPI_SETTINGS_PATH))
         mode = "cached-settings"
+    elif sessionid:
+        client.login_by_sessionid(sessionid)
+        mode = "sessionid"
     elif has_credentials:
         if not client.login(username, password):
             raise RuntimeError("Instagrapi credential login was not accepted")
         mode = "password"
-    elif sessionid:
-        client.login_by_sessionid(sessionid)
-        mode = "sessionid"
     else:
         _close_instagrapi_client(client)
         return None, "disabled"
 
-    if has_credentials and mode in {"settings", "cached-settings"}:
-        # The library validates saved state first; one fresh login is allowed only
-        # when explicitly configured by the operator.
-        if not client.login(username, password):
-            raise RuntimeError("Instagrapi saved-session renewal was not accepted")
-        mode = "settings+password-renewal"
+    if has_credentials and mode in {"settings", "cached-settings", "sessionid"}:
+        # Explicit opt-in only. During initial boot, keep an accepted browser
+        # session if the password login flow is rejected by Instagram; during
+        # recovery, fail closed if the stale saved authorization cannot be renewed.
+        try:
+            if not client.login(username, password):
+                raise RuntimeError("Instagrapi saved-session renewal was not accepted")
+            mode = "settings+password-renewal"
+        except Exception:
+            if require_renewal:
+                raise
+            if mode == "sessionid":
+                mode = "sessionid-renewal-failed"
+            else:
+                mode = "settings-renewal-failed"
 
     return client, mode
 
@@ -818,9 +835,10 @@ def _invalidate_instagrapi_client(
 
 def _refresh_instagrapi_client(client: object | None):
     """Try one credential-backed renewal, guarded against concurrent login loops."""
+    auto_reauth = os.environ.get("INSTAGRAPI_AUTO_REAUTH", "").strip().lower() in {"1", "true", "yes", "on"}
     username = os.environ.get("INSTAGRAPI_USERNAME", "").strip()
     password = os.environ.get("INSTAGRAPI_PASSWORD", "")
-    if not username or not password:
+    if not auto_reauth or not username or not password:
         _invalidate_instagrapi_client(client, "expired-session")
         return None
 
@@ -840,7 +858,7 @@ def _refresh_instagrapi_client(client: object | None):
 
         renewed = None
         try:
-            renewed, mode = _build_instagrapi_client()
+            renewed, mode = _build_instagrapi_client(require_renewal=True)
             if renewed is None:
                 raise RuntimeError("Instagrapi renewal is not configured")
             _INSTAGRAPI_STATE.update(
