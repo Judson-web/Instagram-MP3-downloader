@@ -348,12 +348,20 @@ function sourceCooldownError(res: Response, source: SourceCooldownKey, remaining
   const seconds = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, Math.max(1, Math.ceil(remainingSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS)));
   const isInstagram = source === "instagram";
   const isResolver = source === "resolver";
+  const isApify = source === "apify";
+  const isCobalt = source === "cobalt-primary" || source === "cobalt-secondary";
   const code: ApiErrorCode = isInstagram ? "INSTAGRAM_RATE_LIMITED" : (isResolver ? "RESOLVER_RATE_LIMITED" : "PROVIDER_RATE_LIMITED");
-  const title = isInstagram ? "Instagram is temporarily limiting requests" :
-    (isResolver ? "The link lookup service is cooling down" : "The media provider is cooling down");
+  const title = isInstagram ? "Direct Instagram access is cooling down" :
+    (isResolver ? "The link lookup service is cooling down" :
+      (isCobalt ? "A media extraction provider is cooling down" :
+        (isApify ? "The optional Apify provider is cooling down" : "The media provider is cooling down")));
   const error = isInstagram
-    ? "ReelTone has paused further Instagram requests to respect the source limit. Wait for the cooldown instead of retrying repeatedly."
-    : "ReelTone has paused requests to this lookup provider and will avoid calling it again until its cooldown expires.";
+    ? "Direct Instagram requests are paused briefly. Cached downloads and independent configured providers remain available."
+    : isCobalt
+      ? "This Cobalt instance is paused briefly; the other configured provider can still be used."
+      : isApify
+        ? "Apify returned a provider limit. ReelTone pauses that provider briefly and keeps other extraction paths available."
+        : "ReelTone has briefly paused requests to this provider; other configured providers remain available.";
   return sendApiError(res, 503, {
     code, title, error, retryable: true, category: "rate-limit", retryAfterSeconds: seconds
   });
@@ -2240,7 +2248,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   // Instagram again, and the cache stores files privately rather than publishing URLs.
   try {
     if (!(await checkRateLimit(clientKey(req)))) {
-      return sendApiError(res, 429, { code: "RATE_LIMITED", title: "Hourly conversion limit reached", error: "This site allows eight conversion attempts per hour per visitor. Please wait for the limit to reset before trying again.", retryable: true, category: "rate-limit" });
+      return sendApiError(res, 429, { code: "RATE_LIMITED", title: "Hourly conversion limit reached", error: "This site allows 20 conversion attempts per hour per visitor. Please wait for the limit to reset before trying again.", retryable: true, category: "rate-limit" });
     }
   } catch (error) {
     console.error("Rate-limit database is unavailable:", errorName(error) || "unknown error");
@@ -2952,6 +2960,17 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   if (/(?:http error 429|429 too many requests|instagram-rate-limited|please wait a few minutes before you try again|instagram.{0,80}rate.?limit)/i.test(diagnosticText)) {
     const seconds = await registerSourceCooldown("instagram");
     return sourceCooldownError(res, "instagram", seconds);
+  }
+  if (["apify-rate-limited", "apify-provider-cooldown"].includes(apifyFallback.reason)) {
+    const seconds = (await getSourceCooldownSeconds("apify")) || apifyFallback.retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS;
+    return sourceCooldownError(res, "apify", seconds);
+  }
+  if (["cobalt-rate-limited", "cobalt-provider-cooldown"].includes(cobaltFallback.reason)) {
+    const source = cobaltFallback.reason === "cobalt-provider-cooldown" && cobaltEndpoints.length > 1
+      ? "cobalt-secondary"
+      : "cobalt-primary";
+    const seconds = (await getSourceCooldownSeconds(source)) || cobaltFallback.retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS;
+    return sourceCooldownError(res, source, seconds);
   }
   if (["resolver-rate-limited", "resolver-cooldown"].includes(publicResolver.reason)) {
     const seconds = (await getSourceCooldownSeconds("resolver")) || publicResolver.retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS;
