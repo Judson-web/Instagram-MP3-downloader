@@ -1578,7 +1578,7 @@ async function tryImpersonatedYtDlpToMp3(
         "Accept": "audio/mpeg, application/json"
       },
       body: JSON.stringify({ url: sourceUrl, quality }),
-      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(65000)])
+      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(110000)])
     });
 
     if (parentSignal.aborted) {
@@ -1655,7 +1655,7 @@ async function tryImpersonatedYtDlpToMp3(
       readableFromWeb(response.body),
       limiter,
       fs.createWriteStream(outputPath, { flags: "wx" }),
-      { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(65000)]) }
+      { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(110000)]) }
     );
 
     if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 128) {
