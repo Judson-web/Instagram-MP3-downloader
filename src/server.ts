@@ -2114,6 +2114,17 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       console.warn("ReelTone Cobalt fallback failed:", cobaltFallback.reason, safeDiagnostic);
     }
 
+    // Cobalt can return an Instagram CDN 429 on the actual media download.
+    // Treat that as a source cooldown, while distinguishing it from a 429 on
+    // Cobalt's own API so a provider quota does not globally block Instagram.
+    if (
+      cobaltFallback.reason === "cobalt-rate-limited" &&
+      /cobalt-download-http-429/i.test(String(cobaltFallback.diagnostic || ""))
+    ) {
+      instagramCooldownAtStart = await registerSourceCooldown("instagram", cobaltFallback.retryAfterSeconds);
+      instagramDirectBlocked = true;
+    }
+
     const impersonatedEndpoint = getConfiguredImpersonatedExtractorUrl();
     if (!(await shouldSkipDirectInstagram()) && impersonatedEndpoint) {
       impersonatedFallback = await tryImpersonatedYtDlpToMp3(
@@ -2127,11 +2138,10 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       recordStage("yt-dlp-impersonated", impersonatedFallback.reason);
 
       if (impersonatedFallback.reason === "impersonated-rate-limited") {
-        const seconds = await registerSourceCooldown("instagram", impersonatedFallback.retryAfterSeconds);
-        instagramCooldownAtStart = seconds;
+        instagramCooldownAtStart = await registerSourceCooldown("instagram", impersonatedFallback.retryAfterSeconds);
         instagramDirectBlocked = true;
-        cleanup();
-        return sourceCooldownError(res, "instagram", seconds);
+        // Continue to configured external providers below, but shouldSkipDirectInstagram()
+        // will prevent further direct Instagram requests in this same conversion.
       }
       if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
         cleanup();
