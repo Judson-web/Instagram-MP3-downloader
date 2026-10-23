@@ -769,19 +769,20 @@ def _build_instagrapi_client(require_renewal: bool = False):
 def _persist_instagrapi_settings(client: object) -> None:
     """Persist rotated settings to owner-only ephemeral storage; never print them."""
     temporary = INSTAGRAPI_SETTINGS_PATH.with_suffix(".tmp")
-    try:
-        dump = getattr(client, "dump_settings", None)
-        if not callable(dump):
-            return
-        dump(str(temporary))
-        os.chmod(temporary, 0o600)
-        temporary.replace(INSTAGRAPI_SETTINGS_PATH)
-        os.chmod(INSTAGRAPI_SETTINGS_PATH, 0o600)
-    except Exception:
+    with _INSTAGRAPI_LOCK:
         try:
-            temporary.unlink(missing_ok=True)
+            dump = getattr(client, "dump_settings", None)
+            if not callable(dump):
+                return
+            dump(str(temporary))
+            os.chmod(temporary, 0o600)
+            temporary.replace(INSTAGRAPI_SETTINGS_PATH)
+            os.chmod(INSTAGRAPI_SETTINGS_PATH, 0o600)
         except Exception:
-            pass
+            try:
+                temporary.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _get_instagrapi_client():
@@ -971,12 +972,19 @@ def _media_video_urls(media: object) -> list[str]:
     resources = _media_value(media, "resources") or []
     if isinstance(resources, (list, tuple)):
         for resource in resources:
-            add(
-                _media_value(resource, "video_url") or _media_value(resource, "url"),
-                _media_value(resource, "width", 0),
-                _media_value(resource, "height", 0),
-                priority=0,
-            )
+            resource_type = str(
+                _media_value(resource, "media_type", _media_value(resource, "type", "")) or ""
+            ).lower()
+            video_url = _media_value(resource, "video_url")
+            if not video_url and resource_type in {"2", "video"}:
+                video_url = _media_value(resource, "url")
+            if video_url:
+                add(
+                    video_url,
+                    _media_value(resource, "width", 0),
+                    _media_value(resource, "height", 0),
+                    priority=0,
+                )
     found.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return [item[2] for item in found[:3]]
 
@@ -1132,9 +1140,38 @@ def try_instagrapi_public_media(
         if media_type not in {"2", "video"} and not video_urls:
             return None
         if not video_urls:
-            with _INSTAGRAPI_LOCK:
-                media = client.media_info_v1(media_pk)
-            video_urls = _media_video_urls(media)
+            try:
+                with _INSTAGRAPI_LOCK:
+                    media = client.media_info_v1(media_pk)
+                video_urls = _media_video_urls(media)
+            except HTTPException:
+                raise
+            except Exception as metadata_error:
+                metadata_kind = _instagrapi_error_kind(metadata_error)
+                if metadata_kind == "rate-limited":
+                    _invalidate_instagrapi_client(
+                        client, "rate-limited", INSTAGRAPI_RATE_COOLDOWN_SECONDS
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        headers={"Retry-After": str(INSTAGRAPI_RATE_COOLDOWN_SECONDS)},
+                        detail={
+                            "code": "INSTAGRAPI_RATE_LIMITED",
+                            "error": "Instagram temporarily limited the authenticated media request.",
+                        },
+                    )
+                if metadata_kind == "expired-session":
+                    client = _refresh_instagrapi_client(client)
+                    if client is None:
+                        return None
+                    try:
+                        with _INSTAGRAPI_LOCK:
+                            media = client.media_info_v1(media_pk)
+                        video_urls = _media_video_urls(media)
+                    except Exception:
+                        return None
+                else:
+                    return None
         if not video_urls:
             return None
 
