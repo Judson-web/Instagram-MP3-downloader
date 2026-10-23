@@ -143,8 +143,11 @@ function classifyConversionFailure(evidence: string, timedOut = false): { status
   if (/reel-unavailable|not found|does not exist|removed|deleted|no longer available|expired media/.test(message)) {
     return { status: 404, payload: { code: "REEL_UNAVAILABLE", title: "This Reel could not be found", error: "The post may have been removed, the link may be mistyped, or Instagram may have stopped serving the media.", retryable: false, category: "availability" } };
   }
+  if (/cobalt-download-failed.*timeouterror|cobalt-timeout/.test(message)) {
+    return { status: 503, payload: { code: "EXTRACTOR_STREAM_TIMEOUT", title: "The media stream stalled while downloading", error: "The extractor found a media stream, but the download did not finish within the time limit. Try again, or use another publicly playable Reel.", retryable: true, category: "conversion" } };
+  }
   if (/resolver-(?:http|failed)|cobalt-(?:http|error|unavailable|timeout|download|invalid|no-mp3|empty|untrusted)|provider-not-configured|provider-no-media|provider-request-failed|dns|fetch failed|econnreset/.test(message)) {
-    return { status: 503, payload: { code: "RESOLVER_UNAVAILABLE", title: "The media resolver is temporarily unavailable", error: "The link lookup service did not respond successfully. Try again in a little while.", retryable: true, category: "service" } };
+    return { status: 503, payload: { code: "RESOLVER_UNAVAILABLE", title: "The media extractor is temporarily unavailable", error: "The video source could not be retrieved from the configured extraction providers. Please retry, or try a different public Reel.", retryable: true, category: "service" } };
   }
   if (/no-public-media|no-public-video-metadata|no media in embed payload|resolver-no-media|resolver-no-video|media-not-public|instagram-page-unavailable|extract_failed/.test(message)) {
     return { status: 422, payload: { code: "NO_PUBLIC_MEDIA", title: "No publicly playable video was found", error: "Instagram did not expose a playable video to the converter. The Reel may be private, login-gated, age/region-restricted, removed, or temporarily unavailable. Instagram's response doesn't let us distinguish those cases reliably.", retryable: false, category: "availability" } };
@@ -1222,6 +1225,8 @@ async function tryCobaltToMp3(
         return { ok: false, reason: "cobalt-untrusted-download-host" };
       }
 
+      // The initial API response only contains a tunnel URL. Large or slow media bodies
+      // need their own bounded transfer budget; 25 seconds clipped some valid streams.
       const mediaResponse = await fetch(current, {
         method: "GET",
         redirect: "manual",
@@ -1229,7 +1234,7 @@ async function tryCobaltToMp3(
           "User-Agent": INSTAGRAM_BROWSER_UA,
           "Accept": "audio/mpeg,audio/*,application/octet-stream,*/*;q=0.5"
         },
-        signal: AbortSignal.any([parentSignal, AbortSignal.timeout(25000)])
+        signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)])
       });
 
       if ([301, 302, 303, 307, 308].includes(mediaResponse.status)) {
@@ -1278,7 +1283,7 @@ async function tryCobaltToMp3(
           readableFromWeb(mediaResponse.body),
           limiter,
           fs.createWriteStream(inputPath, { flags: "wx" }),
-          { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(25000)]) }
+          { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(60000)]) }
         );
       } catch (error) {
         fs.rmSync(inputPath, { force: true });
