@@ -23,6 +23,7 @@ from yt_dlp.utils import DownloadError
 
 MAX_DURATION_SECONDS = 20 * 60
 MAX_FILE_BYTES = 150 * 1024 * 1024
+MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024
 ALLOWED_HOSTS = {"instagram.com", "www.instagram.com", "m.instagram.com"}
 POST_PATH = re.compile(r"^/(?:reel|reels|p|tv)/[A-Za-z0-9_-]+/?$", re.IGNORECASE)
 QUALITY_PRESETS = {"128", "192", "256", "320"}
@@ -127,6 +128,74 @@ def allowed_instagram_media_url(raw: str) -> str | None:
         return raw
     except Exception:
         return None
+
+
+
+def download_public_thumbnail(session, item: dict, directory: Path) -> Path | None:
+    """Fetch only a bounded image from a validated Instagram CDN host."""
+    versions = item.get("image_versions2") or {}
+    raw_candidates = list(versions.get("candidates") or [])
+    raw_candidates.extend(item.get("thumbnail_resources") or [])
+    for key in ("thumbnail_url", "display_url", "thumbnail_src"):
+        if item.get(key):
+            raw_candidates.append({"url": item[key], "width": 0, "height": 0})
+
+    unique: dict[str, tuple[int, str]] = {}
+    for candidate in raw_candidates:
+        raw_url = candidate.get("url") or candidate.get("src")
+        if not isinstance(raw_url, str):
+            continue
+        safe_url = allowed_instagram_media_url(raw_url)
+        if not safe_url:
+            continue
+        try:
+            pixels = int(candidate.get("width") or 0) * int(candidate.get("height") or 0)
+        except (TypeError, ValueError):
+            pixels = 0
+        unique[safe_url] = (pixels, safe_url)
+
+    for _pixels, image_url in sorted(unique.values(), reverse=True):
+        response = None
+        image_path = directory / "graphql-cover"
+        try:
+            response = session.get(image_url, stream=True, timeout=12)
+            final_url = allowed_instagram_media_url(str(getattr(response, "url", image_url)))
+            if response.status_code == 429 or not response.ok or not final_url:
+                continue
+
+            content_type = str(response.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+            if content_type not in {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/avif"}:
+                continue
+            try:
+                declared_size = int(response.headers.get("content-length", "0"))
+            except (TypeError, ValueError):
+                declared_size = 0
+            if declared_size > MAX_THUMBNAIL_BYTES:
+                continue
+
+            received = 0
+            with image_path.open("wb") as output:
+                for chunk in response.iter_content(chunk_size=32 * 1024):
+                    if not chunk:
+                        continue
+                    received += len(chunk)
+                    if received > MAX_THUMBNAIL_BYTES:
+                        raise ValueError("thumbnail too large")
+                    output.write(chunk)
+            if received >= 128:
+                return image_path
+        except Exception:
+            image_path.unlink(missing_ok=True)
+            continue
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+    return None
 
 
 def try_graphql_public_media(
@@ -269,40 +338,82 @@ def try_graphql_public_media(
             source_file.unlink(missing_ok=True)
             return None
 
+        user = item.get("user") or item.get("owner") or {}
+        caption = item.get("caption")
+        if isinstance(caption, dict):
+            caption = caption.get("text")
+        title = clean_metadata(item.get("title") or caption or ("Instagram Reel " + shortcode), 160)
+        author = clean_metadata(
+            user.get("full_name") or user.get("username") or "",
+            80,
+        )
+        cover_path = download_public_thumbnail(session, item, directory)
+
         ffmpeg = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
-        result = subprocess.run(
-            [
+
+        def encode(include_cover: bool):
+            args = [
                 ffmpeg,
                 "-hide_banner",
                 "-loglevel", "error",
                 "-y",
                 "-i", str(source_file),
-                "-vn",
+            ]
+            if include_cover and cover_path is not None:
+                args.extend(["-i", str(cover_path)])
+            args.extend([
                 "-map", "0:a:0",
                 "-codec:a", "libmp3lame",
                 "-b:a", f"{quality}k",
                 "-map_metadata", "-1",
-                str(audio_file),
-            ],
-            capture_output=True,
-            check=False,
-            timeout=60,
-        )
+                "-metadata", "title=" + title,
+                "-metadata", "album=Instagram Reels",
+                "-metadata", "comment=Converted with ReelTone",
+                "-id3v2_version", "3",
+            ])
+            if author:
+                args.extend(["-metadata", "artist=" + author])
+            if include_cover and cover_path is not None:
+                args.extend([
+                    "-map", "1:v:0",
+                    "-codec:v", "mjpeg",
+                    "-disposition:v:0", "attached_pic",
+                ])
+            else:
+                args.append("-vn")
+            args.extend(["-f", "mp3", str(audio_file)])
+            return subprocess.run(
+                args,
+                capture_output=True,
+                check=False,
+                timeout=60,
+            )
+
+        result = None
+        if cover_path is not None:
+            try:
+                result = encode(include_cover=True)
+            except Exception:
+                result = None
+        if result is None or result.returncode != 0:
+            # Cover art is an enhancement, never a reason to lose otherwise
+            # playable audio. Retry once without artwork if tagging it fails.
+            audio_file.unlink(missing_ok=True)
+            try:
+                result = encode(include_cover=False)
+            except Exception:
+                result = None
+
         source_file.unlink(missing_ok=True)
-        if result.returncode != 0 or not audio_file.exists() or audio_file.stat().st_size < 128:
+        if cover_path is not None:
+            cover_path.unlink(missing_ok=True)
+        if result is None or result.returncode != 0 or not audio_file.exists() or audio_file.stat().st_size < 128:
             audio_file.unlink(missing_ok=True)
             return None
 
-        user = item.get("user") or item.get("owner") or {}
-        caption = item.get("caption")
-        if isinstance(caption, dict):
-            caption = caption.get("text")
         return {
-            "title": clean_metadata(item.get("title") or caption, 160),
-            "uploader": clean_metadata(
-                user.get("full_name") or user.get("username") or "",
-                80,
-            ),
+            "title": title,
+            "uploader": author,
             "_extractor": "instagram-graphql",
         }
     except HTTPException:
@@ -384,6 +495,10 @@ def convert(
                     "extractaudio": True,
                     "audioformat": "mp3",
                     "audioquality": f"{payload.quality}K",
+                    # Reuse yt-dlp's mature postprocessors for metadata and ID3 cover art.
+                    "addmetadata": True,
+                    "writethumbnail": True,
+                    "embedthumbnail": True,
                     "ffmpeg_location": shutil.which("ffmpeg") or "/usr/bin/ffmpeg",
                     "impersonate": profile,
                     "http_headers": {
