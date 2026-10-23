@@ -1032,7 +1032,7 @@ interface CobaltApiPayload {
 
 function getConfiguredCobaltEndpoint(): URL | null {
   const raw = process.env.COBALT_API_URL?.trim();
-  const key = process.env.COBALT_API_KEY?.trim();
+  const key = (process.env.COBALT_API_KEY_V2 || process.env.COBALT_API_KEY)?.trim();
   if (!raw || !key) return null;
 
   try {
@@ -1085,7 +1085,7 @@ async function tryCobaltToMp3(
   setProcess: ProcessSetter,
   endpoint: URL
 ): Promise<ConversionAttempt> {
-  const apiKey = process.env.COBALT_API_KEY?.trim();
+  const apiKey = (process.env.COBALT_API_KEY_V2 || process.env.COBALT_API_KEY)?.trim();
   if (!apiKey) return { ok: false, reason: "cobalt-not-configured" };
 
   const inputPath = path.join(directory, "cobalt-source.bin");
@@ -1118,7 +1118,7 @@ async function tryCobaltToMp3(
           }),
           // A dedicated API may be waking from idle. Allow it time to start,
           // then make one bounded retry rather than failing the whole conversion.
-          signal: AbortSignal.any([parentSignal, AbortSignal.timeout(12000)])
+          signal: AbortSignal.any([parentSignal, AbortSignal.timeout(30000)])
         });
       } catch (error) {
         if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
