@@ -42,6 +42,8 @@ Requirements: Node.js 22 or later and a Neon Postgres database. Optional extract
 2. Install dependencies with `npm install`.
 3. Set `DATABASE_URL` to your Neon connection string.
 4. Set `RATE_LIMIT_SECRET` to a cryptographically random value of at least 32 bytes.
+Optional: `IMPERSONATED_YTDLP_API_URL` and `IMPERSONATED_YTDLP_API_TOKEN` enable an independent Render-hosted Python `yt-dlp[default,curl-cffi]` extractor. It uses browser impersonation without login cookies, accepts only public Instagram post URLs, and is invoked after the dedicated Cobalt instances fail. See the "Impersonated extractor service" section for deployment details.
+
 5. Optionally set `COBALT_API_URL` and `COBALT_API_KEY_V2` (or the compatibility alias `COBALT_API_KEY`) for a dedicated Cobalt API instance. When configured, Cobalt is tried first and receives the submitted Instagram URL. Set `COBALT_API_FALLBACK_URLS` to a comma- or newline-separated list of additional HTTPS Cobalt instances that accept the same key; ReelTone tries these only after a retryable transport or media-download failure. Configure only instances you control or trust. `MEDIA_RESOLVER_URL` and `EASYDOWN_API_TOKEN` enable additional optional providers at later fallback stages; leave those unset unless you trust their data-handling policies.
 6. Run `npm run check` to type-check the application.
 7. Run `npm test` to verify IP anonymization behavior.
@@ -86,3 +88,8 @@ Use public links only. Private or login-gated media may not be available. Downlo
 ## License
 
 ReelTone is distributed under the [Apache License 2.0](LICENSE).
+
+
+## Impersonated extractor service
+
+Deploy a Render Docker web service from this repository using `Dockerfile.extractor` (Docker runtime). Set `REELTONE_EXTRACTOR_TOKEN` to a strong random shared secret. The service validates URLs independently, disables the public API docs, caps source duration and size, and returns MP3 bytes directly. Configure the identical value as `IMPERSONATED_YTDLP_API_TOKEN` in Vercel and set `IMPERSONATED_YTDLP_API_URL` to the service root. No Instagram account cookies are collected or forwarded.
