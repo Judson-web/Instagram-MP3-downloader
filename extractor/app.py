@@ -355,26 +355,20 @@ def convert(
         shortcode_match = re.search(r"/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", parsed_source.path)
         shortcode = shortcode_match.group(1) if shortcode_match else ""
         info = None
-        last_download_error: Exception | None = None
         final_failure: tuple[int, str, str] | None = None
 
-        # First try Instagram's anonymous public GraphQL media query. This can
-        # return CDN video metadata even when the individual HTML page redirects
-        # logged-out visitors to the login screen. If the query is stale or fails,
-        # continue to the upstream yt-dlp extractor below.
+        # First try Instagram's anonymous public GraphQL media query. It may
+        # return CDN video URLs even when a logged-out page redirects to login.
+        # If the query is stale or errors, continue to yt-dlp's own extractor.
         if shortcode:
             info = try_graphql_public_media(source_url, shortcode, directory, payload.quality)
 
-        # A successful direct GraphQL extraction writes graphql-audio.mp3.
-        # In that case skip both browser-fingerprint download attempts.
+        # GraphQL success writes graphql-audio.mp3. Otherwise, use two separate
+        # impersonated fingerprints with bounded retries and no cookies.
         if info is None:
-            # The impersonated TLS/browser profile must own its matching User-Agent.
-        # Manually overriding it with an older Chrome version can undo the benefit
-        # of curl-cffi impersonation. Try one alternate profile on generic/empty
-        # media failures, but stop immediately for login walls, removed posts,
-        # duration limits, or explicit upstream rate limits.
+            final_failure = None
             for profile in ("chrome", "safari"):
-                    output_template = str(directory / (profile + "-audio.%(ext)s"))
+                output_template = str(directory / (profile + "-audio.%(ext)s"))
                 options = {
                     "format": "best[acodec!=none]/best",
                     "outtmpl": output_template,
@@ -398,33 +392,30 @@ def convert(
                     },
                     "overwrites": True,
                 }
-    
+
                 try:
                     with yt_dlp.YoutubeDL(options) as downloader:
                         info = downloader.extract_info(source_url, download=True)
-                    last_download_error = None
                     final_failure = None
                     break
                 except DownloadError as error:
-                    last_download_error = error
                     final_failure = safe_download_error(error)
-                    status, code, message = final_failure
+                    _status, code, _message = final_failure
                     if code in {"SOURCE_RATE_LIMITED", "LOGIN_REQUIRED", "REEL_UNAVAILABLE", "VIDEO_TOO_LONG"}:
                         break
-                    # Retry only once, with a distinct supported browser fingerprint.
+                    # Retry once with a distinct supported browser fingerprint.
                     continue
-                except Exception as error:
-                    last_download_error = error
+                except Exception:
                     final_failure = (503, "EXTRACTOR_UNAVAILABLE", "The extractor could not finish the request.")
                     if profile == "chrome":
                         continue
                     break
-    
+
             if final_failure is not None:
                 status, code, message = final_failure
                 raise HTTPException(status_code=status, detail={"code": code, "error": message})
-    
-            audio_candidates = [
+
+        audio_candidates = [
             item for item in directory.iterdir()
             if item.is_file() and item.suffix.lower() == ".mp3"
         ]
