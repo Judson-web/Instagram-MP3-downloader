@@ -1296,7 +1296,7 @@ app.get("/api/health", async (_req: Request, res: Response) => {
     const sql = getSql();
     if (!sql) throw new Error("DATABASE_URL is not configured");
     await sql`SELECT 1 AS ok`;
-    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!cobaltEndpoint, easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
+    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!getConfiguredCobaltEndpoint(), easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
   } catch {
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "Service health check failed", error: "The application is live, but its dedicated Neon database is not reachable.", retryable: true, category: "service" });
   }
