@@ -143,15 +143,16 @@ function classifyConversionFailure(evidence: string, timedOut = false): { status
   if (/reel-unavailable|not found|does not exist|removed|deleted|no longer available|expired media/.test(message)) {
     return { status: 404, payload: { code: "REEL_UNAVAILABLE", title: "This Reel could not be found", error: "The post may have been removed, the link may be mistyped, or Instagram may have stopped serving the media.", retryable: false, category: "availability" } };
   }
+  if (/no-public-media|no-public-video-metadata|no media in embed payload|resolver-no-media|resolver-no-video|media-not-public|instagram-page-unavailable|extract_failed/.test(message)) {
+    return { status: 422, payload: { code: "NO_PUBLIC_MEDIA", title: "No publicly playable video was found", error: "Instagram did not expose a playable video to the converter. The Reel may be private, login-gated, age/region-restricted, removed, or temporarily unavailable. Instagram's response doesn't let us distinguish those cases reliably.", retryable: false, category: "availability" } };
+  }
   if (/cobalt-download-failed.*timeouterror|cobalt-timeout/.test(message)) {
     return { status: 503, payload: { code: "EXTRACTOR_STREAM_TIMEOUT", title: "The media stream stalled while downloading", error: "The extractor found a media stream, but the download did not finish within the time limit. Try again, or use another publicly playable Reel.", retryable: true, category: "conversion" } };
   }
   if (/resolver-(?:http|failed)|cobalt-(?:http|error|unavailable|timeout|download|invalid|no-mp3|empty|untrusted)|provider-not-configured|provider-no-media|provider-request-failed|dns|fetch failed|econnreset/.test(message)) {
     return { status: 503, payload: { code: "RESOLVER_UNAVAILABLE", title: "The media extractor is temporarily unavailable", error: "The video source could not be retrieved from the configured extraction providers. Please retry, or try a different public Reel.", retryable: true, category: "service" } };
   }
-  if (/no-public-media|no-public-video-metadata|no media in embed payload|resolver-no-media|resolver-no-video|media-not-public|instagram-page-unavailable|extract_failed/.test(message)) {
-    return { status: 422, payload: { code: "NO_PUBLIC_MEDIA", title: "No publicly playable video was found", error: "Instagram did not expose a playable video to the converter. The Reel may be private, login-gated, age/region-restricted, removed, or temporarily unavailable. Instagram's response doesn't let us distinguish those cases reliably.", retryable: false, category: "availability" } };
-  }
+
 
   return { status: 502, payload: { code: "CONVERSION_FAILED", title: "We couldn't convert this Reel", error: "The source could not be converted into an MP3. Check that the link is correct and publicly accessible, then try again.", retryable: true, category: "conversion" } };
 }
@@ -1071,7 +1072,8 @@ function getConfiguredCobaltEndpoints(): URL[] {
     }
   }
 
-  return endpoints;
+  // Keep the failover chain deliberately bounded: primary plus one independent instance.
+  return endpoints.slice(0, 2);
 }
 
 function getConfiguredCobaltEndpoint(): URL | null {
@@ -1087,8 +1089,8 @@ function shouldRetryCobaltEndpoint(reason: string): boolean {
     "cobalt-download-redirect-failed",
     "cobalt-download-not-media"
   ].includes(reason) ||
-    /^cobalt-http-(?:408|425|5\d\d)$/.test(reason) ||
-    /^cobalt-download-http-(?:403|404|408|425|5\d\d)$/.test(reason);
+    /^cobalt-http-(?:400|408|425|5\d\d)$/.test(reason) ||
+    /^cobalt-download-http-(?:400|403|404|408|425|5\d\d)$/.test(reason);
 }
 
 function isAllowedCobaltDownloadUrl(raw: string, endpoint: URL): boolean {
@@ -1327,13 +1329,159 @@ async function tryCobaltToMp3(
   }
 }
 
+
+function getConfiguredImpersonatedExtractorUrl(): URL | null {
+  const raw = process.env.IMPERSONATED_YTDLP_API_URL?.trim();
+  const token = process.env.IMPERSONATED_YTDLP_API_TOKEN?.trim();
+  if (!raw || !token) return null;
+
+  try {
+    const configured = new URL(raw);
+    const host = configured.hostname.toLowerCase();
+    if (
+      configured.protocol !== "https:" ||
+      configured.username ||
+      configured.password ||
+      configured.hash ||
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host.endsWith(".local") ||
+      net.isIP(host) !== 0
+    ) return null;
+    return new URL("/convert", configured);
+  } catch {
+    return null;
+  }
+}
+
+async function tryImpersonatedYtDlpToMp3(
+  sourceUrl: string,
+  directory: string,
+  outputPath: string,
+  quality: QualityPreset,
+  parentSignal: AbortSignal,
+  endpoint: URL
+): Promise<ConversionAttempt> {
+  const token = process.env.IMPERSONATED_YTDLP_API_TOKEN?.trim();
+  if (!token) return { ok: false, reason: "impersonated-not-configured" };
+
+  // A prior provider can leave a partial file behind on an interrupted transcode.
+  fs.rmSync(outputPath, { force: true });
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg, application/json"
+      },
+      body: JSON.stringify({ url: sourceUrl, quality }),
+      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(65000)])
+    });
+
+    if (parentSignal.aborted) {
+      await response.body?.cancel().catch(() => {});
+      return { ok: false, reason: "cancelled" };
+    }
+
+    if (!response.ok) {
+      const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
+      let payload: { code?: string; detail?: { code?: string } } | null = null;
+      try {
+        payload = await response.json() as { code?: string; detail?: { code?: string } };
+      } catch { /* Use only the HTTP status when a provider error is not JSON. */ }
+
+      const code = String(payload?.code || payload?.detail?.code || "").toUpperCase();
+      if (code === "VIDEO_TOO_LONG") {
+        return { ok: false, reason: "duration-limit", diagnostic: "impersonated-http-413" };
+      }
+      if (code === "VIDEO_TOO_LARGE") {
+        return { ok: false, reason: "media-too-large", diagnostic: "impersonated-video-too-large" };
+      }
+      if (code === "PRIVATE_REEL") {
+        return { ok: false, reason: "private-reel", diagnostic: "impersonated-private" };
+      }
+      if (code === "LOGIN_REQUIRED") {
+        return { ok: false, reason: "login-required", diagnostic: "impersonated-login-required" };
+      }
+      if (code === "REEL_UNAVAILABLE" || response.status === 404) {
+        return { ok: false, reason: "reel-unavailable", diagnostic: "impersonated-http-404" };
+      }
+      if (response.status === 429) {
+        return { ok: false, reason: "impersonated-rate-limited", retryAfterSeconds, diagnostic: "impersonated-http-429" };
+      }
+      return {
+        ok: false,
+        reason: "impersonated-extractor-unavailable",
+        diagnostic: "impersonated-http-" + response.status
+      };
+    }
+
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("audio/") && !contentType.includes("application/octet-stream")) {
+      await response.body?.cancel().catch(() => {});
+      return { ok: false, reason: "impersonated-invalid-response", diagnostic: "unexpected-content-type" };
+    }
+
+    const declaredBytes = Number(response.headers.get("content-length") || 0);
+    if (declaredBytes > MAX_SOURCE_BYTES) {
+      await response.body?.cancel().catch(() => {});
+      return { ok: false, reason: "media-too-large" };
+    }
+
+    let downloadedBytes = 0;
+    const limiter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        downloadedBytes += chunk.length;
+        if (downloadedBytes > MAX_SOURCE_BYTES) callback(new Error("source media exceeded the size limit"));
+        else callback(null, chunk);
+      }
+    });
+
+    await pipeline(
+      readableFromWeb(response.body),
+      limiter,
+      fs.createWriteStream(outputPath, { flags: "wx" }),
+      { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(65000)]) }
+    );
+
+    if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 128) {
+      fs.rmSync(outputPath, { force: true });
+      return { ok: false, reason: "impersonated-empty-audio" };
+    }
+
+    const decodeHeader = (value: string | null): string | undefined => {
+      if (!value) return undefined;
+      try { return decodeURIComponent(value).replace(/[\r\n\u0000-\u001f]/g, " ").slice(0, 180); }
+      catch { return value.replace(/[\r\n\u0000-\u001f]/g, " ").slice(0, 180); }
+    };
+
+    return {
+      ok: true,
+      reason: "impersonated-ytdlp",
+      title: decodeHeader(response.headers.get("x-reeltone-title")),
+      author: decodeHeader(response.headers.get("x-reeltone-author"))
+    };
+  } catch (error) {
+    fs.rmSync(outputPath, { force: true });
+    if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+    const name = errorName(error);
+    return {
+      ok: false,
+      reason: /timeout/i.test(name) ? "impersonated-timeout" : "impersonated-extractor-unavailable",
+      diagnostic: name.replace(/[^a-z0-9._:-]/gi, "").slice(0, 64)
+    };
+  }
+}
+
 app.get("/api/health", async (_req: Request, res: Response) => {
   res.set("Cache-Control", "no-store");
   try {
     const sql = getSql();
     if (!sql) throw new Error("DATABASE_URL is not configured");
     await sql`SELECT 1 AS ok`;
-    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!getConfiguredCobaltEndpoint(), easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
+    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!getConfiguredCobaltEndpoint(), impersonatedYtDlpConfigured: !!getConfiguredImpersonatedExtractorUrl(), easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
   } catch {
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "Service health check failed", error: "The application is live, but its dedicated Neon database is not reachable.", retryable: true, category: "service" });
   }
@@ -1435,6 +1583,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   let providerFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicResolver: ConversionAttempt = { ok: false, reason: "not-attempted" };
+  let impersonatedFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let extractorError: unknown = null;
   let stageStartedAt = Date.now();
   const stageSummary: string[] = [];
@@ -1495,6 +1644,50 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       const safeDiagnostic = String(cobaltFallback.diagnostic || "")
         .replace(/[^a-z0-9._:-]/gi, "").slice(0, 64);
       console.warn("ReelTone Cobalt fallback failed:", cobaltFallback.reason, safeDiagnostic);
+    }
+
+    const impersonatedEndpoint = getConfiguredImpersonatedExtractorUrl();
+    if (impersonatedEndpoint) {
+      impersonatedFallback = await tryImpersonatedYtDlpToMp3(
+        validated.url,
+        directory,
+        outputPath,
+        quality,
+        fallbackController.signal,
+        impersonatedEndpoint
+      );
+      recordStage("yt-dlp-impersonated", impersonatedFallback.reason);
+
+      if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
+        cleanup();
+        return;
+      }
+      if (impersonatedFallback.ok && fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 128) {
+        audioTitle = impersonatedFallback.title || audioTitle;
+        audioAuthor = impersonatedFallback.author || audioAuthor;
+        await streamResult();
+        return;
+      }
+      if (impersonatedFallback.reason === "duration-limit") {
+        cleanup();
+        return sendApiError(res, 413, { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" });
+      }
+      if (impersonatedFallback.reason === "media-too-large") {
+        cleanup();
+        return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
+      }
+      if (["private-reel", "login-required", "reel-unavailable"].includes(impersonatedFallback.reason)) {
+        cleanup();
+        const failure = classifyConversionFailure(impersonatedFallback.reason);
+        return sendApiError(res, failure.status, failure.payload);
+      }
+      if (!["impersonated-extractor-unavailable", "impersonated-not-configured"].includes(impersonatedFallback.reason)) {
+        console.warn(
+          "ReelTone impersonated extractor fallback failed:",
+          impersonatedFallback.reason,
+          String(impersonatedFallback.diagnostic || "").replace(/[^a-z0-9._:-]/gi, "").slice(0, 64)
+        );
+      }
     }
 
     publicFallback = await tryPublicHtmlToMp3(
@@ -1810,6 +2003,8 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   ].join("\\n");
   const failureEvidence = [
     stageSummary.join(" "),
+    impersonatedFallback.reason,
+    impersonatedFallback.diagnostic || "",
     cobaltFallback.reason,
     cobaltFallback.diagnostic || "",
     providerFallback.reason,
