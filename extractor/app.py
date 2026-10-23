@@ -977,8 +977,9 @@ def convert(
                     if info is None:
                         raise graph_error
             if info is None and shortcode:
-                info = try_gallery_dl_public_media(source_url, shortcode, directory, payload.quality
-        # GraphQL or gallery-dl success writes an MP3 into the request workspace.
+                info = try_gallery_dl_public_media(source_url, shortcode, directory, payload.quality)
+
+        # Extractor success writes an MP3 into the request workspace.
         # Otherwise, use two separate
         # impersonated fingerprints with bounded retries and no cookies.
         if info is None and payload.strategy == "auto":
