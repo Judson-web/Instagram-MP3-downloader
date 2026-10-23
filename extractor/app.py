@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import subprocess
@@ -40,7 +41,9 @@ app = FastAPI(
 class ConvertRequest(BaseModel):
     url: str = Field(min_length=12, max_length=2048)
     quality: Literal["128", "192", "256", "320"] = "192"
-    strategy: Literal["auto", "gallery-dl-only"] = "auto"
+    strategy: Literal[
+        "auto", "gallery-dl-only", "instagrapi-only", "rate-limit-fallback"
+    ] = "auto"
 
 
 class ThumbnailRequest(BaseModel):
@@ -585,6 +588,203 @@ def thumbnail(
 
 
 
+def instagrapi_is_configured() -> bool:
+    return bool(
+        os.environ.get("INSTAGRAPI_SETTINGS_JSON", "").strip()
+        or os.environ.get("INSTAGRAPI_SETTINGS_B64", "").strip()
+        or os.environ.get("INSTAGRAPI_SESSIONID", "").strip()
+    )
+
+
+def try_instagrapi_public_media(
+    source_url: str,
+    shortcode: str,
+    directory: Path,
+    quality: str,
+) -> dict | None:
+    """Fetch one public video via a configured, operator-owned instagrapi session."""
+    settings_raw = os.environ.get("INSTAGRAPI_SETTINGS_JSON", "").strip()
+    settings_b64 = os.environ.get("INSTAGRAPI_SETTINGS_B64", "").strip()
+    sessionid = os.environ.get("INSTAGRAPI_SESSIONID", "").strip()
+    if not (settings_raw or settings_b64 or sessionid):
+        return None
+
+    source_file = directory / "instagrapi-source.bin"
+    audio_file = directory / "instagrapi-audio.mp3"
+    client = None
+    response = None
+
+    try:
+        from instagrapi import Client
+
+        client = Client()
+        # No generic retry train: one metadata request plus one bounded CDN transfer.
+        client.set_retry_config(
+            request_timeout=18,
+            session_retry_total=0,
+            session_retry_backoff_factor=0,
+            session_retry_statuses=[],
+        )
+
+        if settings_raw or settings_b64:
+            if settings_raw:
+                settings = json.loads(settings_raw)
+            else:
+                settings = json.loads(base64.b64decode(settings_b64, validate=True).decode("utf-8"))
+            if not isinstance(settings, dict) or not settings:
+                return None
+            client.set_settings(settings)
+        else:
+            # Session IDs are secrets. Keep them only in the service environment.
+            client.login_by_sessionid(sessionid)
+
+        media_pk = int(client.media_pk_from_code(shortcode))
+        media = client.media_info_v1(media_pk)
+
+        owner = getattr(media, "user", None)
+        if bool(getattr(owner, "is_private", False)):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "PRIVATE_REEL", "error": "This converter only processes public Instagram media."},
+            )
+        if int(getattr(media, "media_type", 0) or 0) != 2:
+            return None
+
+        duration_value = getattr(media, "video_duration", None)
+        try:
+            duration = float(duration_value) if duration_value is not None else 0.0
+        except (TypeError, ValueError):
+            duration = 0.0
+        if duration > MAX_DURATION_SECONDS:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "VIDEO_TOO_LONG", "error": "This Reel exceeds the 20-minute conversion limit."},
+            )
+
+        media_url = allowed_instagram_media_url(str(getattr(media, "video_url", "") or ""))
+        if not media_url:
+            return None
+
+        response = client.private.get(media_url, stream=True, timeout=(10, 22))
+        if response.status_code == 429:
+            raise HTTPException(
+                status_code=503,
+                headers={"Retry-After": "300"},
+                detail={"code": "INSTAGRAPI_RATE_LIMITED", "error": "Instagram temporarily limited the authenticated media request."},
+            )
+        if response.status_code in (401, 403):
+            return None
+        final_url = allowed_instagram_media_url(str(getattr(response, "url", media_url)))
+        if not response.ok or not final_url:
+            return None
+
+        content_type = str(response.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+        if content_type.startswith("text/") or "application/json" in content_type:
+            return None
+        try:
+            declared_size = int(response.headers.get("content-length", "0"))
+        except (TypeError, ValueError):
+            declared_size = 0
+        if declared_size > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail={"code": "VIDEO_TOO_LARGE"})
+
+        received = 0
+        with source_file.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                received += len(chunk)
+                if received > MAX_FILE_BYTES:
+                    raise HTTPException(status_code=413, detail={"code": "VIDEO_TOO_LARGE"})
+                output.write(chunk)
+        response.close()
+        response = None
+        if received < 128:
+            source_file.unlink(missing_ok=True)
+            return None
+
+        ffprobe = shutil.which("ffprobe")
+        ffmpeg = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+        if not ffprobe:
+            return None
+        probe = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(source_file)],
+            capture_output=True, text=True, timeout=8, check=False,
+        )
+        try:
+            probed_duration = float((probe.stdout or "").strip())
+        except (TypeError, ValueError):
+            probed_duration = 0.0
+        if probe.returncode != 0 or probed_duration <= 0:
+            return None
+        if probed_duration > MAX_DURATION_SECONDS:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "VIDEO_TOO_LONG", "error": "This Reel exceeds the 20-minute conversion limit."},
+            )
+
+        raw_caption = getattr(media, "caption_text", None) or ""
+        title = clean_metadata(raw_caption or ("Instagram Reel " + shortcode), 160)
+        artist = clean_metadata(getattr(owner, "username", "") or "", 80)
+        audio_file.unlink(missing_ok=True)
+        args = [
+            ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+            "-i", str(source_file), "-vn", "-map", "0:a:0?",
+            "-codec:a", "libmp3lame", "-b:a", f"{quality}k",
+            "-map_metadata", "-1", "-metadata", "title=" + title,
+            "-metadata", "album=Instagram Reels",
+            "-metadata", "comment=Converted with ReelTone",
+            "-id3v2_version", "3",
+        ]
+        if artist:
+            args.extend(["-metadata", "artist=" + artist])
+        args.extend(["-f", "mp3", str(audio_file)])
+        encoded = subprocess.run(args, capture_output=True, timeout=35, check=False)
+        if encoded.returncode != 0 or not audio_file.exists() or audio_file.stat().st_size < 128:
+            audio_file.unlink(missing_ok=True)
+            return None
+
+        return {"title": title, "uploader": artist, "_extractor": "instagrapi"}
+    except HTTPException:
+        raise
+    except Exception as error:
+        # Never include exception text: it can contain signed URLs or account details.
+        error_name = type(error).__name__.lower()
+        message = str(error).lower()
+        if (
+            "throttled" in error_name
+            or "ratelimit" in error_name
+            or "rate limit" in message
+            or "too many requests" in message
+            or "http 429" in message
+            or "status code 429" in message
+            or "please wait" in message
+        ):
+            raise HTTPException(
+                status_code=503,
+                headers={"Retry-After": "300"},
+                detail={"code": "INSTAGRAPI_RATE_LIMITED", "error": "Instagram temporarily limited the authenticated media request."},
+            )
+        return None
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+        if client is not None:
+            for session_name in ("private", "public", "graphql"):
+                session = getattr(client, session_name, None)
+                close = getattr(session, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+        source_file.unlink(missing_ok=True)
+
+
 def try_gallery_dl_public_media(
     source_url: str,
     shortcode: str,
@@ -737,51 +937,52 @@ def convert(
         final_failure: tuple[int, str, str] | None = None
 
         if payload.strategy == "gallery-dl-only":
-            # Cobalt (or a previous direct extraction) reported an Instagram
-            # source cooldown. Try exactly one independent extractor family on
-            # the separately hosted service; do not run GraphQL or both yt-dlp
-            # impersonation profiles again in this request.
+            # Make exactly one gallery-dl request when the service-level cooldown permits it.
             if shortcode:
-                info = try_gallery_dl_public_media(
-                    source_url, shortcode, directory, payload.quality
-                )
+                info = try_gallery_dl_public_media(source_url, shortcode, directory, payload.quality)
             if info is None:
                 raise HTTPException(
                     status_code=503,
-                    detail={
-                        "code": "NO_PUBLIC_MEDIA",
-                        "error": "The independent public-media extractor returned no playable file.",
-                    },
+                    detail={"code": "NO_PUBLIC_MEDIA", "error": "The independent public-media extractor returned no playable file."},
+                )
+        elif payload.strategy in ("instagrapi-only", "rate-limit-fallback"):
+            # Use the authenticated mobile API once during an active source cooldown.
+            if shortcode:
+                info = try_instagrapi_public_media(source_url, shortcode, directory, payload.quality)
+            if info is None and payload.strategy == "rate-limit-fallback" and shortcode:
+                info = try_gallery_dl_public_media(source_url, shortcode, directory, payload.quality)
+            if info is None:
+                code = (
+                    "INSTAGRAPI_NOT_CONFIGURED"
+                    if payload.strategy == "instagrapi-only" and not instagrapi_is_configured()
+                    else "NO_PUBLIC_MEDIA"
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": code, "error": "No playable public media was returned by the configured fallback."},
                 )
         else:
-            # Default strategy: GraphQL first, then gallery-dl as an independent
-            # parser for public posts whose metadata query is empty or stale.
-            if shortcode:
+            # Prefer the authenticated mobile API when configured. If it has no
+            # media, retain the anonymous GraphQL and gallery-dl path.
+            if shortcode and instagrapi_is_configured():
+                info = try_instagrapi_public_media(source_url, shortcode, directory, payload.quality)
+            if info is None and shortcode:
                 try:
-                    info = try_graphql_public_media(
-                        source_url, shortcode, directory, payload.quality
-                    )
+                    info = try_graphql_public_media(source_url, shortcode, directory, payload.quality)
                 except HTTPException as graph_error:
                     detail = graph_error.detail if isinstance(graph_error.detail, dict) else {}
                     if detail.get("code") != "SOURCE_RATE_LIMITED":
                         raise
-                    # Give the current independent extractor one bounded chance:
-                    # gallery-dl's Instagram implementation uses a different
-                    # request path from the anonymous GraphQL helper.
-                    info = try_gallery_dl_public_media(
-                        source_url, shortcode, directory, payload.quality
-                    )
+                    info = try_gallery_dl_public_media(source_url, shortcode, directory, payload.quality)
                     if info is None:
                         raise graph_error
             if info is None and shortcode:
-                info = try_gallery_dl_public_media(
-                    source_url, shortcode, directory, payload.quality
-                )
+                info = try_gallery_dl_public_media(source_url, shortcode, directory, payload.quality)
 
-        # GraphQL or gallery-dl success writes an MP3 into the request workspace.
+        # Extractor success writes an MP3 into the request workspace.
         # Otherwise, use two separate
         # impersonated fingerprints with bounded retries and no cookies.
-        if info is None and payload.strategy != "gallery-dl-only":
+        if info is None and payload.strategy == "auto":
             final_failure = None
             for profile in ("chrome", "safari"):
                 output_template = str(directory / (profile + "-audio.%(ext)s"))
