@@ -1667,6 +1667,8 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   const streamResult = async () => {
     const shortcode = new URL(validated.url).pathname.match(/^\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1];
     const metadataTitle = audioTitle || (shortcode ? "Instagram Reel " + shortcode : "Instagram Reel");
+    audioTitle = metadataTitle;
+    if (!audioAuthor) audioAuthor = "Instagram";
     await embedMp3Metadata(
       outputPath,
       directory,
