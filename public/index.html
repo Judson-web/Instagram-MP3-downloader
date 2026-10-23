@@ -138,23 +138,13 @@
 
           <div class="quality-row">
             <div class="quality-copy">
-              <span class="field-label" id="quality-label">AUDIO QUALITY</span>
-              <span>Balance file size and audio quality</span>
+              <span class="field-label" id="quality-label">MP3 OUTPUT</span>
+              <span>One consistent default for every download</span>
             </div>
-            <input type="hidden" id="quality" name="quality" value="192">
-            <div class="quality-select" id="quality-select">
-              <button class="quality-trigger" id="quality-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="quality-options" aria-labelledby="quality-label quality-current">
-                <span id="quality-current">192 kbps</span>
-                <svg class="quality-chevron" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m5 7.5 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              </button>
-              <div class="quality-options" id="quality-options" role="listbox" aria-labelledby="quality-label" hidden>
-                <button class="quality-option" type="button" role="option" data-quality="128" aria-selected="false" tabindex="-1"><span><strong>128 kbps</strong><small>Smaller file</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-                <button class="quality-option" type="button" role="option" data-quality="192" aria-selected="true" tabindex="-1"><span><strong>192 kbps</strong><small>Balanced quality</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-                <button class="quality-option" type="button" role="option" data-quality="256" aria-selected="false" tabindex="-1"><span><strong>256 kbps</strong><small>High quality</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-                <button class="quality-option" type="button" role="option" data-quality="320" aria-selected="false" tabindex="-1"><span><strong>320 kbps</strong><small>Highest bitrate</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-              </div>
+            <div class="quality-fixed" aria-labelledby="quality-label">
+              <span class="quality-fixed-value">192 kbps</span>
+              <span class="quality-fixed-note">Default</span>
             </div>
-            <span class="visually-hidden" id="quality-status" role="status" aria-live="polite"></span>
           </div>
 
           <button class="convert-button" id="convert-button" type="submit">
