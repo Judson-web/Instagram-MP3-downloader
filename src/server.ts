@@ -709,24 +709,24 @@ async function embedMp3Metadata(
     "-c:a", "copy",
     "-c:v", "copy",
     "-map_metadata", "-1",
-    "-id3v2_version", "3",
     "-metadata", "album=Instagram Reels",
-    "-metadata", "comment=Converted with ReelTone",
-    "-f", "mp3",
-    taggedPath
+    "-metadata", "comment=Converted with ReelTone"
   ];
-  if (safeTitle) args.splice(args.length - 2, 0, "-metadata", "title=" + safeTitle);
-  if (safeArtist) args.splice(args.length - 2, 0, "-metadata", "artist=" + safeArtist);
+  if (safeTitle) args.push("-metadata", "title=" + safeTitle);
+  if (safeArtist) args.push("-metadata", "artist=" + safeArtist);
+  args.push("-id3v2_version", "3", "-f", "mp3", taggedPath);
 
   await new Promise<void>((resolve) => {
     let finished = false;
     let timedOut = false;
     let stderr = "";
     let child: ChildProcess | null = null;
+    let timeout: NodeJS.Timeout | null = null;
+
     const finish = (replace: boolean): void => {
       if (finished) return;
       finished = true;
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       signal.removeEventListener("abort", abortHandler);
       setProcess(null);
       if (replace && fs.existsSync(taggedPath)) {
@@ -746,16 +746,17 @@ async function embedMp3Metadata(
       child?.kill("SIGKILL");
       finish(false);
     };
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child?.kill("SIGKILL");
-    }, 12000);
-    timeout.unref?.();
 
     try {
-      child = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+      child = spawn(ffmpegPath as string, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
       setProcess(child);
       signal.addEventListener("abort", abortHandler, { once: true });
+      timeout = setTimeout(() => {
+        timedOut = true;
+        child?.kill("SIGKILL");
+      }, 12000);
+      timeout.unref?.();
+
       child.stderr?.on("data", (chunk) => {
         stderr = (stderr + chunk.toString()).slice(-1200);
       });
