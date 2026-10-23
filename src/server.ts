@@ -985,6 +985,304 @@ async function embedMp3Metadata(
   });
 }
 
+interface ApifyInstagramReelItem {
+  url?: string;
+  shortCode?: string;
+  shortcode?: string;
+  videoUrl?: string;
+  video_url?: string;
+  audioUrl?: string;
+  audio_url?: string;
+  videoDuration?: number | string;
+  video_duration?: number | string;
+  durationSeconds?: number | string;
+  duration?: number | string;
+  caption?: string;
+  ownerUsername?: string;
+  ownerFullName?: string;
+  error?: string;
+}
+
+function getConfiguredApifyToken(): string | null {
+  const token = process.env.APIFY_API_TOKEN?.trim();
+  return token || null;
+}
+
+function cleanProviderMetadata(value: unknown, maximum: number): string {
+  return String(value || "")
+    .replace(/[\r\n\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maximum);
+}
+
+/**
+ * Optional paid public-media extractor. The actor is explicitly capped to one
+ * result and $0.05 per run. Its API token is sent only to api.apify.com; media
+ * downloads use a separate request with no provider credentials or Instagram
+ * session cookies attached.
+ */
+async function tryApifyReelToMp3(
+  sourceUrl: string,
+  shortcode: string,
+  directory: string,
+  outputPath: string,
+  quality: QualityPreset,
+  parentSignal: AbortSignal,
+  setProcess: ProcessSetter
+): Promise<ConversionAttempt> {
+  const token = getConfiguredApifyToken();
+  if (!token) return { ok: false, reason: "apify-not-configured" };
+
+  const sourcePath = path.join(directory, "apify-source.bin");
+  fs.rmSync(sourcePath, { force: true });
+
+  try {
+    const endpoint = new URL(
+      "https://api.apify.com/v2/acts/apify~instagram-reel-scraper/run-sync-get-dataset-items"
+    );
+    endpoint.searchParams.set("timeout", "50");
+    endpoint.searchParams.set("maxItems", "1");
+    endpoint.searchParams.set("maxTotalChargeUsd", "0.05");
+    endpoint.searchParams.set("format", "json");
+
+    const actorResponse = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        username: [sourceUrl],
+        resultsLimit: 1,
+        includeDownloadedVideo: false,
+        includeTranscript: false,
+        includeSharesCount: false
+      }),
+      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(55000)])
+    });
+
+    if (parentSignal.aborted) {
+      await actorResponse.body?.cancel().catch(() => {});
+      return { ok: false, reason: "cancelled" };
+    }
+    if (actorResponse.status === 429) {
+      await actorResponse.body?.cancel().catch(() => {});
+      return {
+        ok: false,
+        reason: "apify-rate-limited",
+        retryAfterSeconds: parseRetryAfterSeconds(actorResponse.headers.get("retry-after")),
+        diagnostic: "apify-http-429"
+      };
+    }
+    if ([401, 403].includes(actorResponse.status)) {
+      await actorResponse.body?.cancel().catch(() => {});
+      return { ok: false, reason: "apify-auth-failed", diagnostic: "apify-http-" + actorResponse.status };
+    }
+    if (!actorResponse.ok) {
+      await actorResponse.body?.cancel().catch(() => {});
+      return {
+        ok: false,
+        reason: "apify-http-" + actorResponse.status,
+        diagnostic: "apify-http-" + actorResponse.status
+      };
+    }
+
+    const payload: unknown = await actorResponse.json().catch(() => null);
+    const items: ApifyInstagramReelItem[] = Array.isArray(payload)
+      ? payload as ApifyInstagramReelItem[]
+      : (payload && typeof payload === "object" && Array.isArray((payload as { items?: unknown }).items)
+        ? (payload as { items: ApifyInstagramReelItem[] }).items
+        : []);
+    if (!items.length) return { ok: false, reason: "apify-no-media" };
+
+    const itemCode = (item: ApifyInstagramReelItem): string => {
+      const value = item.shortCode || item.shortcode || "";
+      if (value) return value;
+      try {
+        const parsed = new URL(String(item.url || ""));
+        return parsed.pathname.match(/\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1] || "";
+      } catch {
+        return "";
+      }
+    };
+    const item = items.find((candidate) => itemCode(candidate) === shortcode) ||
+      (items.length === 1 && !itemCode(items[0]) ? items[0] : undefined);
+    if (!item) return { ok: false, reason: "apify-no-media", diagnostic: "apify-shortcode-mismatch" };
+
+    const durationRaw = item.videoDuration ?? item.video_duration ?? item.durationSeconds ?? item.duration;
+    const duration = Number(durationRaw);
+    if (Number.isFinite(duration) && duration > MAX_DURATION_SECONDS) {
+      return { ok: false, reason: "duration-limit" };
+    }
+
+    const candidates = [...new Set([
+      item.videoUrl,
+      item.video_url,
+      item.audioUrl,
+      item.audio_url
+    ].filter((value): value is string => typeof value === "string" && value.length > 0))]
+      .filter((value) => isAllowedMediaAsset(value))
+      .slice(0, 3);
+    if (!candidates.length) {
+      const isPrivate = /private|login required|login_required/i.test(String(item.error || ""));
+      return { ok: false, reason: isPrivate ? "login-required" : "apify-no-media" };
+    }
+
+    let downloaded = false;
+    let lastMediaFailure = "apify-media-unavailable";
+    for (const candidate of candidates) {
+      let current: URL;
+      try { current = new URL(candidate); }
+      catch { continue; }
+
+      let accepted = false;
+      let responseContentType = "";
+      for (let redirects = 0; redirects <= 3; redirects++) {
+        if (!isAllowedMediaAsset(current.toString())) {
+          lastMediaFailure = "apify-untrusted-media-host";
+          break;
+        }
+        let mediaResponse: globalThis.Response;
+        try {
+          mediaResponse = await fetch(current, {
+            method: "GET",
+            redirect: "manual",
+            headers: {
+              "User-Agent": INSTAGRAM_BROWSER_UA,
+              "Referer": "https://www.instagram.com/",
+              "Accept": "video/mp4,video/*,audio/*,application/octet-stream,*/*;q=0.4"
+            },
+            signal: AbortSignal.any([parentSignal, AbortSignal.timeout(45000)])
+          });
+        } catch (error) {
+          if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+          lastMediaFailure = /timeout/i.test(errorName(error)) ? "apify-media-timeout" : "apify-media-network-error";
+          break;
+        }
+
+        if (parentSignal.aborted) {
+          await mediaResponse.body?.cancel().catch(() => {});
+          return { ok: false, reason: "cancelled" };
+        }
+        if ([301, 302, 303, 307, 308].includes(mediaResponse.status)) {
+          const location = mediaResponse.headers.get("location");
+          await mediaResponse.body?.cancel().catch(() => {});
+          if (!location || redirects === 3) {
+            lastMediaFailure = "apify-media-redirect-failed";
+            break;
+          }
+          try { current = new URL(location, current); }
+          catch { lastMediaFailure = "apify-media-redirect-failed"; break; }
+          continue;
+        }
+        if (mediaResponse.status === 429) {
+          await mediaResponse.body?.cancel().catch(() => {});
+          return {
+            ok: false,
+            reason: "instagram-rate-limited",
+            retryAfterSeconds: parseRetryAfterSeconds(mediaResponse.headers.get("retry-after")),
+            diagnostic: "apify-cdn-http-429"
+          };
+        }
+        if (!mediaResponse.ok || !mediaResponse.body) {
+          lastMediaFailure = "apify-media-http-" + mediaResponse.status;
+          await mediaResponse.body?.cancel().catch(() => {});
+          break;
+        }
+
+        responseContentType = String(mediaResponse.headers.get("content-type") || "").split(";", 1)[0].toLowerCase();
+        if (
+          responseContentType.startsWith("text/") ||
+          responseContentType.includes("application/json") ||
+          (!responseContentType.startsWith("video/") &&
+            !responseContentType.startsWith("audio/") &&
+            !responseContentType.includes("octet-stream") &&
+            !current.pathname.toLowerCase().match(/\.(?:mp4|m4v|mov|webm|m4a|mp3|aac|ogg|opus)$/))
+        ) {
+          await mediaResponse.body.cancel().catch(() => {});
+          lastMediaFailure = "apify-media-not-media";
+          break;
+        }
+
+        const contentLength = Number(mediaResponse.headers.get("content-length") || 0);
+        if (contentLength > MAX_SOURCE_BYTES) {
+          await mediaResponse.body.cancel().catch(() => {});
+          return { ok: false, reason: "media-too-large" };
+        }
+
+        let downloadedBytes = 0;
+        const limiter = new Transform({
+          transform(chunk: Buffer, _encoding, callback) {
+            downloadedBytes += chunk.length;
+            if (downloadedBytes > MAX_SOURCE_BYTES) callback(new Error("source media exceeded the size limit"));
+            else callback(null, chunk);
+          }
+        });
+        fs.rmSync(sourcePath, { force: true });
+        try {
+          await pipeline(
+            readableFromWeb(mediaResponse.body),
+            limiter,
+            fs.createWriteStream(sourcePath, { flags: "wx" }),
+            { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(45000)]) }
+          );
+        } catch (error) {
+          fs.rmSync(sourcePath, { force: true });
+          if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+          if (/size limit/.test(errorMessage(error))) return { ok: false, reason: "media-too-large" };
+          lastMediaFailure = /timeout/i.test(errorName(error)) ? "apify-media-timeout" : "apify-media-download-failed";
+          break;
+        }
+
+        if (!fs.existsSync(sourcePath) || fs.statSync(sourcePath).size < 128) {
+          fs.rmSync(sourcePath, { force: true });
+          lastMediaFailure = "apify-empty-media";
+          break;
+        }
+        accepted = true;
+        downloaded = true;
+        break;
+      }
+      if (accepted) break;
+    }
+
+    if (!downloaded) return { ok: false, reason: lastMediaFailure };
+
+    // Use the same bounded FFmpeg path as the existing providers so the output
+    // is always re-encoded to the single 192 kbps default.
+    await encodeDownloadedVideo(
+      sourcePath,
+      outputPath,
+      quality,
+      parentSignal,
+      setProcess
+    );
+    if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 128) {
+      fs.rmSync(outputPath, { force: true });
+      return { ok: false, reason: "apify-no-mp3" };
+    }
+
+    const title = cleanProviderMetadata(item.caption || "Instagram Reel " + shortcode, 180);
+    const author = cleanProviderMetadata(item.ownerUsername || item.ownerFullName || "", 80);
+    return { ok: true, reason: "apify", title, author };
+  } catch (error) {
+    if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+    if (/timeout/i.test(errorName(error))) {
+      return { ok: false, reason: "apify-timeout", diagnostic: "apify-request-timeout" };
+    }
+    return {
+      ok: false,
+      reason: "apify-unavailable",
+      diagnostic: errorName(error).replace(/[^a-z0-9._:-]/gi, "").slice(0, 64)
+    };
+  } finally {
+    fs.rm(sourcePath, { force: true }, () => {});
+  }
+}
+
+
 async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outputPath: string, quality: QualityPreset, parentSignal: AbortSignal, setProcess: ProcessSetter, resolverEndpoint: string): Promise<ConversionAttempt> {
   const inputPath = path.join(directory, "resolver-source.mp4");
   try {
@@ -1912,7 +2210,7 @@ app.get("/api/health", async (_req: Request, res: Response) => {
     const sql = getSql();
     if (!sql) throw new Error("DATABASE_URL is not configured");
     await sql`SELECT 1 AS ok`;
-    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!getConfiguredCobaltEndpoint(), impersonatedYtDlpConfigured: !!getConfiguredImpersonatedExtractorUrl(), audioCacheConfigured: !!getPrivateBlobSdk(), easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
+    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!getConfiguredCobaltEndpoint(), impersonatedYtDlpConfigured: !!getConfiguredImpersonatedExtractorUrl(), apifyConfigured: !!getConfiguredApifyToken(), audioCacheConfigured: !!getPrivateBlobSdk(), easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
   } catch {
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "Service health check failed", error: "The application is live, but its dedicated Neon database is not reachable.", retryable: true, category: "service" });
   }
