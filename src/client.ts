@@ -21,12 +21,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
   const urlInput = byId<HTMLInputElement>("reel-url");
   const inputWrap = byId<HTMLDivElement>("url-input-wrap");
   const urlHint = byId<HTMLParagraphElement>("url-hint");
-  const qualityInput = byId<HTMLInputElement>("quality");
-  const qualityPicker = byId<HTMLDivElement>("quality-select");
-  const qualityTrigger = byId<HTMLButtonElement>("quality-trigger");
-  const qualityCurrent = byId<HTMLSpanElement>("quality-current");
-  const qualityOptions = byId<HTMLDivElement>("quality-options");
-  const qualityOptionButtons = Array.from(qualityOptions.querySelectorAll<HTMLButtonElement>("[data-quality]"));
+  const DEFAULT_QUALITY = "192";
   const pasteButton = byId<HTMLButtonElement>("paste-button");
   const convertButton = byId<HTMLButtonElement>("convert-button");
   const progressPanel = byId<HTMLElement>("progress-panel");
@@ -84,45 +79,6 @@ const byId = <T extends HTMLElement>(id: string): T => {
     element.hidden = !visible;
   }
 
-  function syncQualityOptions() {
-    qualityOptionButtons.forEach((option) => {
-      const selected = option.dataset.quality === qualityInput.value;
-      option.setAttribute("aria-selected", String(selected));
-      option.tabIndex = -1;
-    });
-    qualityCurrent.textContent = qualityInput.value + " kbps";
-    qualityTrigger.setAttribute("aria-label", "Audio quality: " + qualityInput.value + " kbps");
-  }
-
-  function closeQualityList(restoreFocus = false) {
-    qualityOptions.hidden = true;
-    qualityTrigger.setAttribute("aria-expanded", "false");
-    qualityPicker.classList.remove("is-open");
-    if (restoreFocus) qualityTrigger.focus();
-  }
-
-  function openQualityList(focusSelected = true) {
-    if (busy) return;
-    const pickerBounds = qualityPicker.getBoundingClientRect();
-    const spaceAbove = pickerBounds.top;
-    const spaceBelow = window.innerHeight - pickerBounds.bottom;
-    const minimumMenuSpace = Math.min(160, window.innerHeight * 0.3);
-    qualityPicker.classList.toggle("opens-up", spaceAbove >= minimumMenuSpace || spaceAbove >= spaceBelow);
-    qualityOptions.hidden = false;
-    qualityTrigger.setAttribute("aria-expanded", "true");
-    qualityPicker.classList.add("is-open");
-    const selected = qualityOptionButtons.find((option) => option.dataset.quality === qualityInput.value);
-    (focusSelected ? selected : qualityOptionButtons[0])?.focus();
-  }
-
-  function chooseQuality(value: string) {
-    if (!["128", "192", "256", "320"].includes(value)) return;
-    qualityInput.value = value;
-    syncQualityOptions();
-    closeQualityList(false);
-    qualityTrigger.focus();
-  }
-
   type Theme = "light" | "dark";
   const themeStorageKey = "reeltone-theme";
 
@@ -145,10 +101,6 @@ const byId = <T extends HTMLElement>(id: string): T => {
   function setBusy(value: boolean): void {
     busy = value;
     urlInput.disabled = value;
-    qualityInput.disabled = value;
-    qualityTrigger.disabled = value;
-    qualityOptionButtons.forEach((option) => { option.disabled = value; });
-    if (value) closeQualityList(false);
     pasteButton.disabled = value;
     convertButton.disabled = value;
     cancelButton.disabled = !value;
@@ -337,7 +289,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
     }
     if (elapsed >= 22) {
       title = "Finishing your MP3…";
-      subtitle = "Encoding the audio at " + qualityInput.value + " kbps.";
+      subtitle = "Encoding the audio at " + DEFAULT_QUALITY + " kbps.";
       step = "Encoding MP3";
     }
     progressTitle.textContent = title;
@@ -376,7 +328,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
     show(errorPanel, false);
     show(resultPanel, true);
     form.hidden = true;
-    resultQuality.textContent = "MP3 · " + qualityInput.value + " kbps · " + formatBytes(blob.size);
+    resultQuality.textContent = "MP3 · " + DEFAULT_QUALITY + " kbps · " + formatBytes(blob.size);
     resultFilename.textContent = audioTitle || "reeltone.mp3";
     resultAuthor.textContent = audioAuthor ? "by " + audioAuthor : "MP3 audio · ready to download";
     setBusy(false);
@@ -444,7 +396,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
       const response = await fetch("/api/convert", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "audio/mpeg, application/json" },
-        body: JSON.stringify({ url, quality: qualityInput.value }),
+        body: JSON.stringify({ url, quality: DEFAULT_QUALITY }),
         signal: abortController.signal
       });
 
@@ -494,41 +446,6 @@ const byId = <T extends HTMLElement>(id: string): T => {
     const target = event.target;
     if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"], [contenteditable=""]')) return;
     event.preventDefault();
-  });
-
-  syncQualityOptions();
-  qualityTrigger.addEventListener("click", () => {
-    if (qualityOptions.hidden) openQualityList();
-    else closeQualityList(false);
-  });
-  qualityOptionButtons.forEach((option) => {
-    option.addEventListener("click", () => chooseQuality(option.dataset.quality || ""));
-    option.addEventListener("keydown", (event: KeyboardEvent) => {
-      const index = qualityOptionButtons.indexOf(option);
-      let next = index;
-      if (event.key === "ArrowDown") next = (index + 1) % qualityOptionButtons.length;
-      else if (event.key === "ArrowUp") next = (index - 1 + qualityOptionButtons.length) % qualityOptionButtons.length;
-      else if (event.key === "Home") next = 0;
-      else if (event.key === "End") next = qualityOptionButtons.length - 1;
-      else if (event.key === "Escape") { event.preventDefault(); closeQualityList(true); return; }
-      else if (event.key === "Tab") { closeQualityList(false); return; }
-      else return;
-      event.preventDefault();
-      qualityOptionButtons[next]?.focus();
-    });
-  });
-  qualityTrigger.addEventListener("keydown", (event: KeyboardEvent) => {
-    if (["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
-      event.preventDefault();
-      if (qualityOptions.hidden) openQualityList(event.key !== "ArrowDown");
-      else qualityOptionButtons[0]?.focus();
-    } else if (event.key === "Escape") closeQualityList(false);
-  });
-  document.addEventListener("pointerdown", (event) => {
-    if (!qualityPicker.contains(event.target as Node)) closeQualityList(false);
-  });
-  document.addEventListener("focusin", (event) => {
-    if (!qualityPicker.contains(event.target as Node)) closeQualityList(false);
   });
 
   const savedTheme = (() => {
@@ -594,8 +511,6 @@ const byId = <T extends HTMLElement>(id: string): T => {
     cancelRequested = false;
     form.hidden = false;
     form.reset();
-    qualityInput.value = "192";
-    syncQualityOptions();
     audioTitle = "";
     audioAuthor = "";
     audioDownloadName = "reeltone.mp3";
