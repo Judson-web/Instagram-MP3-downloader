@@ -229,7 +229,7 @@ def try_graphql_public_media(
             raise HTTPException(
                 status_code=503,
                 headers={"Retry-After": "30"},
-                detail={"code": "GALLERY_DL_RATE_LIMITED", "error": "The independent Instagram gallery extractor was rate-limited."},
+                detail={"code": "SOURCE_RATE_LIMITED", "error": "Instagram temporarily limited anonymous extraction."},
             )
         landing.raise_for_status()
 
@@ -634,7 +634,7 @@ def try_gallery_dl_public_media(
         raise HTTPException(
             status_code=503,
             headers={"Retry-After": "30"},
-            detail={"code": "SOURCE_RATE_LIMITED", "error": "Instagram temporarily limited anonymous extraction."},
+            detail={"code": "GALLERY_DL_RATE_LIMITED", "error": "The independent Instagram gallery extractor was rate-limited."},
         )
 
     supported = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".m4a", ".mp3", ".ogg", ".opus", ".aac"}
