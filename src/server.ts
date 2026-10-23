@@ -1030,30 +1030,62 @@ interface CobaltApiPayload {
   };
 }
 
-function getConfiguredCobaltEndpoint(): URL | null {
-  const raw = process.env.COBALT_API_URL?.trim();
+function getConfiguredCobaltEndpoints(): URL[] {
   const key = (process.env.COBALT_API_KEY_V2 || process.env.COBALT_API_KEY)?.trim();
-  if (!raw || !key) return null;
+  if (!key) return [];
 
-  try {
-    const endpoint = new URL(raw);
-    const hostname = endpoint.hostname.toLowerCase();
-    if (
-      endpoint.protocol !== "https:" ||
-      endpoint.username ||
-      endpoint.password ||
-      endpoint.hash ||
-      hostname === "localhost" ||
-      hostname.endsWith(".localhost") ||
-      hostname.endsWith(".local") ||
-      net.isIP(hostname) !== 0
-    ) return null;
+  const configured = [
+    process.env.COBALT_API_URL,
+    ...(process.env.COBALT_API_FALLBACK_URLS || "").split(/[,\r\n]+/)
+  ];
+  const endpoints: URL[] = [];
 
-    // Cobalt's API processing endpoint is POST /, irrespective of a trailing slash.
-    return new URL("/", endpoint);
-  } catch {
-    return null;
+  for (const candidate of configured) {
+    const raw = candidate?.trim();
+    if (!raw) continue;
+
+    try {
+      const endpoint = new URL(raw);
+      const hostname = endpoint.hostname.toLowerCase();
+      if (
+        endpoint.protocol !== "https:" ||
+        endpoint.username ||
+        endpoint.password ||
+        endpoint.hash ||
+        hostname === "localhost" ||
+        hostname.endsWith(".localhost") ||
+        hostname.endsWith(".local") ||
+        net.isIP(hostname) !== 0
+      ) continue;
+
+      // Cobalt's API processing endpoint is POST /, irrespective of a trailing slash.
+      const normalized = new URL("/", endpoint);
+      if (!endpoints.some((existing) => existing.origin === normalized.origin)) {
+        endpoints.push(normalized);
+      }
+    } catch {
+      continue;
+    }
   }
+
+  return endpoints;
+}
+
+function getConfiguredCobaltEndpoint(): URL | null {
+  return getConfiguredCobaltEndpoints()[0] || null;
+}
+
+function shouldRetryCobaltEndpoint(reason: string): boolean {
+  return [
+    "cobalt-unavailable",
+    "cobalt-timeout",
+    "cobalt-invalid-response",
+    "cobalt-download-failed",
+    "cobalt-download-redirect-failed",
+    "cobalt-download-not-media"
+  ].includes(reason) ||
+    /^cobalt-http-(?:408|425|5\d\d)$/.test(reason) ||
+    /^cobalt-download-http-(?:403|404|408|425|5\d\d)$/.test(reason);
 }
 
 function isAllowedCobaltDownloadUrl(raw: string, endpoint: URL): boolean {
@@ -1393,7 +1425,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     }
   };
 
-  const cobaltEndpoint = getConfiguredCobaltEndpoint();
+  const cobaltEndpoints = getConfiguredCobaltEndpoints();
   let cobaltFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let providerFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
@@ -1411,9 +1443,10 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   };
 
   try {
-    // Try the configured dedicated extractor first. Direct Instagram HTML frequently
-    // returns a login shell to datacenter IPs; do not spend its full timeout budget first.
-    if (cobaltEndpoint) {
+    // Cobalt is the preferred extractor. If its stream URL fails, give configured
+    // secondary instances a chance before switching extraction strategies.
+    for (let endpointIndex = 0; endpointIndex < cobaltEndpoints.length; endpointIndex++) {
+      const endpoint = cobaltEndpoints[endpointIndex];
       cobaltFallback = await tryCobaltToMp3(
         validated.url,
         directory,
@@ -1421,9 +1454,12 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         quality,
         fallbackController.signal,
         (process) => { fallbackChild = process; },
-        cobaltEndpoint
+        endpoint
       );
-      recordStage("cobalt", cobaltFallback.reason);
+      recordStage(
+        endpointIndex === 0 ? "cobalt-primary" : "cobalt-fallback-" + endpointIndex,
+        cobaltFallback.reason
+      );
 
       if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
         cleanup();
@@ -1442,9 +1478,18 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         cleanup();
         return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
       }
-      if (!["cobalt-not-configured", "cobalt-no-media"].includes(cobaltFallback.reason)) {
-        console.warn("ReelTone Cobalt fallback failed:", String(cobaltFallback.reason || "unknown").slice(0, 80));
-      }
+
+      // Don't fan out when an upstream explicitly rate-limits us or says the
+      // source is unsupported. Fail over only on a transport/download failure.
+      if (cobaltFallback.reason === "cobalt-rate-limited" ||
+          !shouldRetryCobaltEndpoint(cobaltFallback.reason)) break;
+    }
+
+    if (!cobaltFallback.ok &&
+        !["not-attempted", "cobalt-not-configured", "cobalt-no-media"].includes(cobaltFallback.reason)) {
+      const safeDiagnostic = String(cobaltFallback.diagnostic || "")
+        .replace(/[^a-z0-9._:-]/gi, "").slice(0, 64);
+      console.warn("ReelTone Cobalt fallback failed:", cobaltFallback.reason, safeDiagnostic);
     }
 
     publicFallback = await tryPublicHtmlToMp3(

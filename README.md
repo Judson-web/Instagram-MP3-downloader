@@ -42,7 +42,7 @@ Requirements: Node.js 22 or later and a Neon Postgres database. Optional extract
 2. Install dependencies with `npm install`.
 3. Set `DATABASE_URL` to your Neon connection string.
 4. Set `RATE_LIMIT_SECRET` to a cryptographically random value of at least 32 bytes.
-5. Optionally set `COBALT_API_URL` and `COBALT_API_KEY` for a dedicated Cobalt API instance. ReelTone sends the submitted URL to it only after direct Instagram extraction fails. `MEDIA_RESOLVER_URL` and `EASYDOWN_API_TOKEN` enable additional optional providers; leave those unset unless you trust their data-handling policies.
+5. Optionally set `COBALT_API_URL` and `COBALT_API_KEY_V2` (or the compatibility alias `COBALT_API_KEY`) for a dedicated Cobalt API instance. When configured, Cobalt is tried first and receives the submitted Instagram URL. Set `COBALT_API_FALLBACK_URLS` to a comma- or newline-separated list of additional HTTPS Cobalt instances that accept the same key; ReelTone tries these only after a retryable transport or media-download failure. Configure only instances you control or trust. `MEDIA_RESOLVER_URL` and `EASYDOWN_API_TOKEN` enable additional optional providers at later fallback stages; leave those unset unless you trust their data-handling policies.
 6. Run `npm run check` to type-check the application.
 7. Run `npm test` to verify IP anonymization behavior.
 8. Run `npm run build` to test and compile the TypeScript runtime files.
@@ -65,9 +65,9 @@ The service health check confirms the app can connect to its database. It does n
 
 ## Resolver and URL privacy
 
-ReelTone checks the public Instagram page/embed directly first. If that fails, the optional Cobalt fallback is enabled only when both `COBALT_API_URL` and `COBALT_API_KEY` are configured. Cobalt then receives the submitted Instagram URL and may log it under its own policies. Use a dedicated instance and review its data-handling policy.
+When `COBALT_API_URL` and a Cobalt API key are configured, ReelTone tries that dedicated extractor first and sends it the submitted Instagram URL. The optional `COBALT_API_FALLBACK_URLS` list adds failover instances that accept the same key; a secondary instance is tried only when the previous one encounters a transport or media-download failure, not to evade explicit rate limits or source restrictions. Use only instances you control or trust and review their data-handling policies.
 
-The generic media resolver is disabled unless `MEDIA_RESOLVER_URL` is configured to a trusted HTTPS endpoint. The optional EasyDown integration requires `EASYDOWN_API_TOKEN`. Each enabled provider receives the submitted URL when ReelTone reaches that fallback. If providers are not configured or unavailable, ReelTone continues with the local yt-dlp/FFmpeg path.
+The generic media resolver is disabled unless `MEDIA_RESOLVER_URL` is configured to a trusted HTTPS endpoint. The optional EasyDown integration requires `EASYDOWN_API_TOKEN`. Each enabled provider receives the submitted URL when its fallback stage is reached. If those stages are not configured or unavailable, ReelTone continues with public Instagram page/embed parsing and the local yt-dlp/FFmpeg path. Provider health does not guarantee that Instagram will expose a playable stream for every public-looking link.
 
 MP3 download filenames contain a UTC timestamp and random suffix, helping avoid collisions between files with identical titles.
 
