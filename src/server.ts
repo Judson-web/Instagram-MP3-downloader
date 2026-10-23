@@ -278,7 +278,7 @@ function makeIpHash(ip: string): string {
 
 const DEFAULT_SOURCE_COOLDOWN_SECONDS = 300;
 const MAX_SOURCE_COOLDOWN_SECONDS = 3600;
-type SourceCooldownKey = "instagram" | "resolver" | "easydown" | "gallery-dl";
+type SourceCooldownKey = "instagram" | "resolver" | "easydown" | "gallery-dl" | "instagrapi";
 const localSourceCooldowns = new Map<SourceCooldownKey, { until: number; strikeCount: number }>();
 
 function parseRetryAfterSeconds(value: string | null | undefined): number | undefined {
@@ -1760,7 +1760,7 @@ async function tryImpersonatedYtDlpToMp3(
   quality: QualityPreset,
   parentSignal: AbortSignal,
   endpoint: URL,
-  strategy: "auto" | "gallery-dl-only" = "auto"
+  strategy: "auto" | "gallery-dl-only" | "instagrapi-only" | "rate-limit-fallback" = "auto"
 ): Promise<ConversionAttempt> {
   const token = process.env.IMPERSONATED_YTDLP_API_TOKEN?.trim();
   if (!token) return { ok: false, reason: "impersonated-not-configured" };
@@ -1803,6 +1803,17 @@ async function tryImpersonatedYtDlpToMp3(
           retryAfterSeconds,
           diagnostic: "impersonated-gallery-dl-source-rate-limited"
         };
+      }
+      if (code === "INSTAGRAPI_RATE_LIMITED") {
+        return {
+          ok: false,
+          reason: "impersonated-rate-limited",
+          retryAfterSeconds,
+          diagnostic: "impersonated-instagrapi-source-rate-limited"
+        };
+      }
+      if (code === "INSTAGRAPI_NOT_CONFIGURED") {
+        return { ok: false, reason: "no-public-media", diagnostic: "impersonated-instagrapi-not-configured" };
       }
       if (code === "SOURCE_RATE_LIMITED" || response.status === 429) {
         return {
@@ -2167,21 +2178,23 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     const impersonatedEndpoint = getConfiguredImpersonatedExtractorUrl();
     const directInstagramPaused = await shouldSkipDirectInstagram();
     let galleryDlProviderCooldown = 0;
+    let instagrapiProviderCooldown = 0;
     if (directInstagramPaused && instagramCooldownAtStart > 0) {
-      try {
-        galleryDlProviderCooldown = await getSourceCooldownSeconds("gallery-dl");
-      } catch {
-        galleryDlProviderCooldown = -1;
-      }
+      try { galleryDlProviderCooldown = await getSourceCooldownSeconds("gallery-dl"); }
+      catch { galleryDlProviderCooldown = -1; }
+      try { instagrapiProviderCooldown = await getSourceCooldownSeconds("instagrapi"); }
+      catch { instagrapiProviderCooldown = -1; }
     }
-    const galleryDlOnlyFallback =
-      directInstagramPaused &&
-      instagramCooldownAtStart > 0 &&
-      galleryDlProviderCooldown === 0;
-    if (directInstagramPaused && galleryDlProviderCooldown !== 0) {
-      recordStage("gallery-dl", galleryDlProviderCooldown > 0 ? "skipped-provider-cooldown" : "skipped-cooldown-check-failed");
+    let limitedFallbackStrategy: "gallery-dl-only" | "instagrapi-only" | "rate-limit-fallback" | null = null;
+    if (directInstagramPaused && instagramCooldownAtStart > 0) {
+      const canUseGalleryDl = galleryDlProviderCooldown === 0;
+      const canUseInstagrapi = instagrapiProviderCooldown === 0;
+      if (canUseGalleryDl && canUseInstagrapi) limitedFallbackStrategy = "rate-limit-fallback";
+      else if (canUseInstagrapi) limitedFallbackStrategy = "instagrapi-only";
+      else if (canUseGalleryDl) limitedFallbackStrategy = "gallery-dl-only";
+      if (!limitedFallbackStrategy) recordStage("independent-fallback", "skipped-provider-cooldowns");
     }
-    if (impersonatedEndpoint && (!directInstagramPaused || galleryDlOnlyFallback)) {
+    if (impersonatedEndpoint && (!directInstagramPaused || limitedFallbackStrategy !== null)) {
       impersonatedFallback = await tryImpersonatedYtDlpToMp3(
         validated.url,
         directory,
@@ -2189,7 +2202,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         quality,
         fallbackController.signal,
         impersonatedEndpoint,
-        galleryDlOnlyFallback ? "gallery-dl-only" : "auto"
+        limitedFallbackStrategy || "auto"
       );
       recordStage("yt-dlp-impersonated", impersonatedFallback.reason);
 
@@ -2197,11 +2210,17 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         instagramCooldownAtStart = await registerSourceCooldown("instagram", impersonatedFallback.retryAfterSeconds);
         instagramDirectBlocked = true;
         if (
-          galleryDlOnlyFallback ||
+          limitedFallbackStrategy === "gallery-dl-only" ||
           /gallery-dl-source-rate-limited/i.test(String(impersonatedFallback.diagnostic || ""))
         ) {
           await registerSourceCooldown(
             "gallery-dl",
+            instagramCooldownAtStart || impersonatedFallback.retryAfterSeconds || 600
+          );
+        }
+        if (/instagrapi-source-rate-limited/i.test(String(impersonatedFallback.diagnostic || ""))) {
+          await registerSourceCooldown(
+            "instagrapi",
             instagramCooldownAtStart || impersonatedFallback.retryAfterSeconds || 600
           );
         }
