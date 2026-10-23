@@ -602,7 +602,7 @@ def try_gallery_dl_public_media(
         executable,
         "--config-ignore",
         "--no-mtime",
-        "--http-timeout", "8",
+        "--http-timeout", "6",
         "--retries", "0",
         "--sleep-request", "1",
         "--filesize-max", "150M",
@@ -620,7 +620,7 @@ def try_gallery_dl_public_media(
             capture_output=True,
             text=True,
             errors="replace",
-            timeout=35,
+            timeout=18,
             check=False,
         )
     except subprocess.TimeoutExpired:
