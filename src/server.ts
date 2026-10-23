@@ -143,15 +143,16 @@ function classifyConversionFailure(evidence: string, timedOut = false): { status
   if (/reel-unavailable|not found|does not exist|removed|deleted|no longer available|expired media/.test(message)) {
     return { status: 404, payload: { code: "REEL_UNAVAILABLE", title: "This Reel could not be found", error: "The post may have been removed, the link may be mistyped, or Instagram may have stopped serving the media.", retryable: false, category: "availability" } };
   }
+  if (/no-public-media|no-public-video-metadata|no media in embed payload|resolver-no-media|resolver-no-video|media-not-public|instagram-page-unavailable|extract_failed/.test(message)) {
+    return { status: 422, payload: { code: "NO_PUBLIC_MEDIA", title: "No publicly playable video was found", error: "Instagram did not expose a playable video to the converter. The Reel may be private, login-gated, age/region-restricted, removed, or temporarily unavailable. Instagram's response doesn't let us distinguish those cases reliably.", retryable: false, category: "availability" } };
+  }
   if (/cobalt-download-failed.*timeouterror|cobalt-timeout/.test(message)) {
     return { status: 503, payload: { code: "EXTRACTOR_STREAM_TIMEOUT", title: "The media stream stalled while downloading", error: "The extractor found a media stream, but the download did not finish within the time limit. Try again, or use another publicly playable Reel.", retryable: true, category: "conversion" } };
   }
   if (/resolver-(?:http|failed)|cobalt-(?:http|error|unavailable|timeout|download|invalid|no-mp3|empty|untrusted)|provider-not-configured|provider-no-media|provider-request-failed|dns|fetch failed|econnreset/.test(message)) {
     return { status: 503, payload: { code: "RESOLVER_UNAVAILABLE", title: "The media extractor is temporarily unavailable", error: "The video source could not be retrieved from the configured extraction providers. Please retry, or try a different public Reel.", retryable: true, category: "service" } };
   }
-  if (/no-public-media|no-public-video-metadata|no media in embed payload|resolver-no-media|resolver-no-video|media-not-public|instagram-page-unavailable|extract_failed/.test(message)) {
-    return { status: 422, payload: { code: "NO_PUBLIC_MEDIA", title: "No publicly playable video was found", error: "Instagram did not expose a playable video to the converter. The Reel may be private, login-gated, age/region-restricted, removed, or temporarily unavailable. Instagram's response doesn't let us distinguish those cases reliably.", retryable: false, category: "availability" } };
-  }
+
 
   return { status: 502, payload: { code: "CONVERSION_FAILED", title: "We couldn't convert this Reel", error: "The source could not be converted into an MP3. Check that the link is correct and publicly accessible, then try again.", retryable: true, category: "conversion" } };
 }
@@ -1383,14 +1384,17 @@ async function tryImpersonatedYtDlpToMp3(
 
     if (!response.ok) {
       const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
-      let payload: { code?: string } | null = null;
+      let payload: { code?: string; detail?: { code?: string } } | null = null;
       try {
-        payload = await response.json() as { code?: string };
+        payload = await response.json() as { code?: string; detail?: { code?: string } };
       } catch { /* Use only the HTTP status when a provider error is not JSON. */ }
 
-      const code = String(payload?.code || "").toUpperCase();
-      if (code === "VIDEO_TOO_LONG" || response.status === 413) {
+      const code = String(payload?.code || payload?.detail?.code || "").toUpperCase();
+      if (code === "VIDEO_TOO_LONG") {
         return { ok: false, reason: "duration-limit", diagnostic: "impersonated-http-413" };
+      }
+      if (code === "VIDEO_TOO_LARGE") {
+        return { ok: false, reason: "media-too-large", diagnostic: "impersonated-video-too-large" };
       }
       if (code === "PRIVATE_REEL") {
         return { ok: false, reason: "private-reel", diagnostic: "impersonated-private" };
