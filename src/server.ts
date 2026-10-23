@@ -681,6 +681,99 @@ async function encodeDownloadedVideo(inputPath: string, outputPath: string, qual
   });
 }
 
+async function embedMp3Metadata(
+  outputPath: string,
+  directory: string,
+  title: string,
+  artist: string,
+  signal: AbortSignal,
+  setProcess: ProcessSetter
+): Promise<void> {
+  if (!ffmpegPath || !fs.existsSync(ffmpegPath) || signal.aborted) return;
+  if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 128) return;
+
+  const cleanTag = (value: string, maximum: number): string =>
+    String(value || "").replace(/[\r\n\u0000-\u001f\u007f]/g, " ").trim().slice(0, maximum);
+  const safeTitle = cleanTag(title, 160);
+  const safeArtist = cleanTag(artist, 80);
+  const taggedPath = path.join(directory, "audio-tagged.mp3");
+  fs.rmSync(taggedPath, { force: true });
+
+  // Preserve any APIC cover-art stream already added by yt-dlp, while adding
+  // standard ID3 tags for players that don't read ReelTone's HTTP headers.
+  const args = [
+    "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+    "-i", outputPath,
+    "-map", "0:a:0",
+    "-map", "0:v?",
+    "-c:a", "copy",
+    "-c:v", "copy",
+    "-map_metadata", "-1",
+    "-id3v2_version", "3",
+    "-metadata", "album=Instagram Reels",
+    "-metadata", "comment=Converted with ReelTone",
+    "-f", "mp3",
+    taggedPath
+  ];
+  if (safeTitle) args.splice(args.length - 2, 0, "-metadata", "title=" + safeTitle);
+  if (safeArtist) args.splice(args.length - 2, 0, "-metadata", "artist=" + safeArtist);
+
+  await new Promise<void>((resolve) => {
+    let finished = false;
+    let timedOut = false;
+    let stderr = "";
+    let child: ChildProcess | null = null;
+    const finish = (replace: boolean): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", abortHandler);
+      setProcess(null);
+      if (replace && fs.existsSync(taggedPath)) {
+        try {
+          if (fs.statSync(taggedPath).size >= 128) fs.renameSync(taggedPath, outputPath);
+          else fs.rmSync(taggedPath, { force: true });
+        } catch {
+          fs.rmSync(taggedPath, { force: true });
+        }
+      } else {
+        fs.rmSync(taggedPath, { force: true });
+      }
+      resolve();
+    };
+
+    const abortHandler = (): void => {
+      child?.kill("SIGKILL");
+      finish(false);
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child?.kill("SIGKILL");
+    }, 12000);
+    timeout.unref?.();
+
+    try {
+      child = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+      setProcess(child);
+      signal.addEventListener("abort", abortHandler, { once: true });
+      child.stderr?.on("data", (chunk) => {
+        stderr = (stderr + chunk.toString()).slice(-1200);
+      });
+      child.once("error", () => finish(false));
+      child.once("close", (code: number | null) => {
+        if (signal.aborted || timedOut || code !== 0) {
+          if (timedOut) console.warn("ReelTone ID3 metadata step timed out; keeping the original MP3.");
+          else if (code !== 0 && stderr) console.warn("ReelTone ID3 metadata step skipped; keeping the original MP3.");
+          return finish(false);
+        }
+        finish(true);
+      });
+    } catch {
+      finish(false);
+    }
+  });
+}
+
 async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outputPath: string, quality: QualityPreset, parentSignal: AbortSignal, setProcess: ProcessSetter, resolverEndpoint: string): Promise<ConversionAttempt> {
   const inputPath = path.join(directory, "resolver-source.mp4");
   try {
@@ -1571,6 +1664,20 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   });
 
   const streamResult = async () => {
+    const shortcode = new URL(validated.url).pathname.match(/^\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1];
+    const metadataTitle = audioTitle || (shortcode ? "Instagram Reel " + shortcode : "Instagram Reel");
+    await embedMp3Metadata(
+      outputPath,
+      directory,
+      metadataTitle,
+      audioAuthor || "Instagram",
+      fallbackController.signal,
+      (process) => { fallbackChild = process; }
+    );
+    if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
+      cleanup();
+      return;
+    }
     const size = fs.statSync(outputPath).size;
     if (size < 128) throw new Error("MP3 output was empty");
     const downloadFilename = timestampedDownloadFilename(audioTitle);
