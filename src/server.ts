@@ -1724,8 +1724,27 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   }
 
   let instagramCooldownAtStart = 0;
+  let instagramDirectBlocked = false;
+  const shouldSkipDirectInstagram = async (): Promise<boolean> => {
+    if (instagramDirectBlocked) return true;
+    try {
+      const remaining = await getSourceCooldownSeconds("instagram");
+      if (remaining > 0) {
+        instagramCooldownAtStart = Math.max(instagramCooldownAtStart, remaining);
+        instagramDirectBlocked = true;
+        return true;
+      }
+      return false;
+    } catch {
+      // Fail closed for direct source fetches when cooldown state cannot be read.
+      instagramDirectBlocked = true;
+      return true;
+    }
+  };
+
   try {
     instagramCooldownAtStart = await getSourceCooldownSeconds("instagram");
+    instagramDirectBlocked = instagramCooldownAtStart > 0;
     if (!(await checkRateLimit(clientKey(req)))) {
       return sendApiError(res, 429, { code: "RATE_LIMITED", title: "Hourly conversion limit reached", error: "This site allows eight conversion attempts per hour per visitor. Please wait for the limit to reset before trying again.", retryable: true, category: "rate-limit" });
     }
@@ -1769,7 +1788,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
 
   const streamResult = async () => {
     const shortcode = new URL(validated.url).pathname.match(/^\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1];
-    const artwork = instagramCooldownAtStart > 0
+    const artwork = (await shouldSkipDirectInstagram())
       ? null
       : await tryGetInstagramArtwork(validated.url, directory, fallbackController.signal);
     if (artwork?.title && (!audioTitle || /^instagram[_\s-]/i.test(audioTitle))) audioTitle = artwork.title;
@@ -1882,7 +1901,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     }
 
     const impersonatedEndpoint = getConfiguredImpersonatedExtractorUrl();
-    if (instagramCooldownAtStart <= 0 && impersonatedEndpoint) {
+    if (!(await shouldSkipDirectInstagram()) && impersonatedEndpoint) {
       impersonatedFallback = await tryImpersonatedYtDlpToMp3(
         validated.url,
         directory,
@@ -1930,7 +1949,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       }
     }
 
-    if (instagramCooldownAtStart <= 0) {
+    if (!(await shouldSkipDirectInstagram())) {
     publicFallback = await tryPublicHtmlToMp3(
       validated.url,
       directory,
@@ -2068,7 +2087,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     }
     if (resolverEndpoint) console.warn("ReelTone optional resolver fallback failed:", String(publicResolver.reason || "unknown").slice(0, 80));
 
-    if (instagramCooldownAtStart > 0) {
+    if (await shouldSkipDirectInstagram()) {
       recordStage("yt-dlp", "skipped-instagram-cooldown");
     } else {
     // Direct Instagram page/embed parsing has already run before optional providers.
