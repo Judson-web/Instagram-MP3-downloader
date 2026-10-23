@@ -2374,6 +2374,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   let publicFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicResolver: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let impersonatedFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
+  let apifyFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let extractorError: unknown = null;
   let stageStartedAt = Date.now();
   const stageSummary: string[] = [];
@@ -2387,14 +2388,19 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   };
 
   try {
-    // Cobalt is the preferred extractor. If its stream URL fails, give configured
-    // secondary instances a chance before switching extraction strategies.
-    if (instagramDirectBlocked) {
-      cobaltFallback = { ok: false, reason: "instagram-cooldown-active", retryAfterSeconds: instagramCooldownAtStart };
-      recordStage("cobalt", "skipped-instagram-cooldown");
-    } else {
+    // These Cobalt instances are independent providers. Direct Instagram's
+    // cooldown should not suppress them; track each provider separately.
+    {
       for (let endpointIndex = 0; endpointIndex < cobaltEndpoints.length; endpointIndex++) {
       const endpoint = cobaltEndpoints[endpointIndex];
+      const providerSource: SourceCooldownKey = endpointIndex === 0 ? "cobalt-primary" : "cobalt-secondary";
+      let providerCooldown = 0;
+      try { providerCooldown = await getSourceCooldownSeconds(providerSource); } catch { providerCooldown = 0; }
+      if (providerCooldown > 0) {
+        cobaltFallback = { ok: false, reason: "cobalt-provider-cooldown", retryAfterSeconds: providerCooldown };
+        recordStage(endpointIndex === 0 ? "cobalt-primary" : "cobalt-fallback-" + endpointIndex, "skipped-provider-cooldown");
+        continue;
+      }
       cobaltFallback = await tryCobaltToMp3(
         validated.url,
         directory,
@@ -2410,6 +2416,9 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       );
       if (cobaltFallback.reason === "instagram-rate-limited") {
         sawCobaltInstagramRateLimit = true;
+      }
+      if (cobaltFallback.reason === "instagram-rate-limited" || cobaltFallback.reason === "cobalt-rate-limited") {
+        await registerSourceCooldown(providerSource, cobaltFallback.retryAfterSeconds);
       }
 
       if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
@@ -2434,11 +2443,11 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       // egress. Give one separately hosted secondary instance a single chance,
       // but never keep rotating providers after the second instance responds.
       if (
-        cobaltFallback.reason === "instagram-rate-limited" &&
+        (cobaltFallback.reason === "instagram-rate-limited" || cobaltFallback.reason === "cobalt-rate-limited") &&
         endpointIndex === 0 &&
         cobaltEndpoints.length > 1
       ) {
-        recordStage("cobalt-primary", "source-limited-trying-independent-instance");
+        recordStage("cobalt-primary", "cooldown-recorded-trying-independent-instance");
         continue;
       }
 
@@ -2452,7 +2461,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     }
 
     if (!cobaltFallback.ok &&
-        !["not-attempted", "cobalt-not-configured", "cobalt-no-media", "instagram-cooldown-active"].includes(cobaltFallback.reason)) {
+        !["not-attempted", "cobalt-not-configured", "cobalt-no-media", "instagram-cooldown-active", "cobalt-provider-cooldown"].includes(cobaltFallback.reason)) {
       const safeDiagnostic = String(cobaltFallback.diagnostic || "")
         .replace(/[^a-z0-9._:-]/gi, "").slice(0, 64);
       console.warn("ReelTone Cobalt fallback failed:", cobaltFallback.reason, safeDiagnostic);
@@ -2553,6 +2562,51 @@ app.post("/api/convert", async (req: Request, res: Response) => {
           String(impersonatedFallback.diagnostic || "").replace(/[^a-z0-9._:-]/gi, "").slice(0, 64)
         );
       }
+    }
+
+    // Apify is an optional independent provider. It remains eligible even when
+    // direct Instagram requests are cooling down, and each run has a small cost cap.
+    let apifyProviderCooldown = 0;
+    try { apifyProviderCooldown = await getSourceCooldownSeconds("apify"); } catch { apifyProviderCooldown = 0; }
+    apifyFallback = apifyProviderCooldown > 0
+      ? { ok: false, reason: "apify-provider-cooldown", retryAfterSeconds: apifyProviderCooldown }
+      : await tryApifyReelToMp3(
+          validated.url,
+          validated.url.match(/\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1] || "",
+          directory,
+          outputPath,
+          quality,
+          fallbackController.signal,
+          (process) => { fallbackChild = process; }
+        );
+    recordStage("apify-instagram", apifyFallback.reason);
+    if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
+      cleanup();
+      return;
+    }
+    if (apifyFallback.reason === "apify-rate-limited") {
+      apifyFallback.retryAfterSeconds = await registerSourceCooldown("apify", apifyFallback.retryAfterSeconds);
+    }
+    if (apifyFallback.reason === "instagram-rate-limited") {
+      instagramCooldownAtStart = await registerSourceCooldown("instagram", apifyFallback.retryAfterSeconds);
+      instagramDirectBlocked = true;
+    }
+    if (apifyFallback.ok && fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 128) {
+      audioTitle = apifyFallback.title || audioTitle;
+      audioAuthor = apifyFallback.author || audioAuthor;
+      await streamResult();
+      return;
+    }
+    if (apifyFallback.reason === "duration-limit") {
+      cleanup();
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" });
+    }
+    if (apifyFallback.reason === "media-too-large") {
+      cleanup();
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
+    }
+    if (apifyFallback.reason !== "apify-not-configured" && apifyFallback.reason !== "apify-provider-cooldown" && !apifyFallback.ok) {
+      console.warn("ReelTone Apify fallback failed:", String(apifyFallback.reason || "unknown").replace(/[^a-z0-9._:-]/gi, "").slice(0, 64));
     }
 
     if (!(await shouldSkipDirectInstagram())) {
@@ -2882,6 +2936,8 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     stageSummary.join(" "),
     impersonatedFallback.reason,
     impersonatedFallback.diagnostic || "",
+    apifyFallback.reason,
+    apifyFallback.diagnostic || "",
     cobaltFallback.reason,
     cobaltFallback.diagnostic || "",
     providerFallback.reason,
