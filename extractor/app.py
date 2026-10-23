@@ -583,6 +583,132 @@ def thumbnail(
             cleanup()
 
 
+
+def try_gallery_dl_public_media(
+    source_url: str,
+    shortcode: str,
+    directory: Path,
+    quality: str,
+) -> dict | None:
+    """Best-effort independent anonymous extractor, bounded and rate-limit aware."""
+    executable = shutil.which("gallery-dl")
+    if not executable:
+        return None
+
+    output_dir = directory / "gallery-dl"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    audio_file = directory / "gallery-dl-audio.mp3"
+    args = [
+        executable,
+        "--config-ignore",
+        "--no-mtime",
+        "--http-timeout", "8",
+        "--retries", "0",
+        "--sleep-request", "1",
+        "--filesize-max", "150M",
+        "--filter", "extension in ('mp4', 'm4v', 'mov', 'webm', 'mkv', 'm4a', 'mp3', 'ogg', 'opus', 'aac')",
+        "--directory", str(output_dir),
+        "--filename", "{id}_{num}.{extension}",
+        source_url,
+    ]
+
+    try:
+        result = subprocess.run(
+            args,
+            cwd=str(directory),
+            env={**os.environ, "HOME": str(directory), "TMPDIR": str(directory)},
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=35,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    except Exception:
+        return None
+
+    diagnostic = (result.stderr or "") + "\n" + (result.stdout or "")
+    if re.search(r"(?:\b429\b|too many requests|rate.?limit)", diagnostic, re.IGNORECASE):
+        raise HTTPException(
+            status_code=503,
+            headers={"Retry-After": "30"},
+            detail={"code": "SOURCE_RATE_LIMITED", "error": "Instagram temporarily limited anonymous extraction."},
+        )
+
+    supported = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".m4a", ".mp3", ".ogg", ".opus", ".aac"}
+    candidates = sorted(
+        (
+            item for item in output_dir.rglob("*")
+            if item.is_file() and item.suffix.lower() in supported and item.stat().st_size >= 128
+        ),
+        key=lambda item: item.stat().st_size,
+        reverse=True,
+    )
+    if not candidates:
+        return None
+
+    media_file = candidates[0]
+    size = media_file.stat().st_size
+    if size > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail={"code": "VIDEO_TOO_LARGE"})
+
+    ffprobe = shutil.which("ffprobe")
+    ffmpeg = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+    if not ffprobe:
+        return None
+
+    try:
+        duration_result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(media_file)],
+            capture_output=True, text=True, timeout=8, check=False,
+        )
+        duration = float((duration_result.stdout or "").strip())
+        if duration <= 0:
+            return None
+        if duration > MAX_DURATION_SECONDS:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "VIDEO_TOO_LONG", "error": "This Reel exceeds the 20-minute conversion limit."},
+            )
+
+        audio_probe = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(media_file)],
+            capture_output=True, text=True, timeout=8, check=False,
+        )
+        if "audio" not in (audio_probe.stdout or "").lower():
+            return None
+
+        title = clean_metadata("Instagram Reel " + shortcode, 160)
+        audio_file.unlink(missing_ok=True)
+        encoded = subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(media_file), "-vn", "-map", "0:a:0",
+                "-codec:a", "libmp3lame", "-b:a", f"{quality}k",
+                "-map_metadata", "-1",
+                "-metadata", "title=" + title,
+                "-metadata", "album=Instagram Reels",
+                "-metadata", "comment=Converted with ReelTone",
+                "-id3v2_version", "3",
+                "-f", "mp3", str(audio_file),
+            ],
+            capture_output=True, timeout=60, check=False,
+        )
+        if encoded.returncode != 0 or not audio_file.exists() or audio_file.stat().st_size < 128:
+            audio_file.unlink(missing_ok=True)
+            return None
+
+        return {"title": title, "uploader": "", "_extractor": "gallery-dl"}
+    except HTTPException:
+        raise
+    except Exception:
+        audio_file.unlink(missing_ok=True)
+        return None
+
+
 @app.post("/convert")
 def convert(
     payload: ConvertRequest,
@@ -615,7 +741,14 @@ def convert(
         if shortcode:
             info = try_graphql_public_media(source_url, shortcode, directory, payload.quality)
 
-        # GraphQL success writes graphql-audio.mp3. Otherwise, use two separate
+        # gallery-dl is a distinct extractor family and occasionally succeeds on
+        # public posts whose GraphQL metadata query is stale or empty. It is
+        # attempted only when GraphQL did not report a source rate limit.
+        if info is None and shortcode:
+            info = try_gallery_dl_public_media(source_url, shortcode, directory, payload.quality)
+
+        # GraphQL or gallery-dl success writes an MP3 into the request workspace.
+        # Otherwise, use two separate
         # impersonated fingerprints with bounded retries and no cookies.
         if info is None:
             final_failure = None
