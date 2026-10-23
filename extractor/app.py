@@ -11,7 +11,7 @@ from typing import Literal
 from urllib.parse import quote, urlparse, urlunparse
 
 import yt_dlp
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -121,7 +121,6 @@ def health():
 def convert(
     payload: ConvertRequest,
     authorization: str | None = Header(default=None),
-    request: Request = None,
 ):
     require_service_token(authorization)
     source_url = canonical_public_instagram_url(payload.url)
