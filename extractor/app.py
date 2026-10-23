@@ -405,11 +405,16 @@ def convert(
                         break
                     # Retry once with a distinct supported browser fingerprint.
                     continue
-                except Exception:
-                    final_failure = (503, "EXTRACTOR_UNAVAILABLE", "The extractor could not finish the request.")
-                    if profile == "chrome":
-                        continue
-                    break
+                except Exception as error:
+                    # yt-dlp raises ExtractorError for some Instagram empty-media
+                    # responses rather than DownloadError. Classify that exception
+                    # too, then allow the alternate fingerprint unless the result
+                    # is a definitive login/removal/rate-limit/duration response.
+                    final_failure = safe_download_error(error)
+                    _status, code, _message = final_failure
+                    if code in {"SOURCE_RATE_LIMITED", "LOGIN_REQUIRED", "REEL_UNAVAILABLE", "VIDEO_TOO_LONG"}:
+                        break
+                    continue
 
             if final_failure is not None:
                 status, code, message = final_failure
