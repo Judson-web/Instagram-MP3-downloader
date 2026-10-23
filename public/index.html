@@ -7,15 +7,15 @@
   <meta name="theme-color" content="#f7f6f2">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://instagramreeltomp3converter.vercel.app/">
-  <meta name="description" content="Convert publicly accessible Instagram Reels to MP3 with ReelTone. Choose your bitrate and download the audio without an account.">
+  <meta name="description" content="Convert public Instagram Reels to MP3 at a consistent 192 kbps bitrate. Download audio without an account.">
   <meta property="og:site_name" content="ReelTone">
   <meta property="og:url" content="https://instagramreeltomp3converter.vercel.app/">
   <meta property="og:locale" content="en_IN">
   <meta property="og:title" content="Instagram Reel to MP3 Converter | ReelTone">
-  <meta property="og:description" content="Convert publicly accessible Instagram Reels to MP3. Choose your bitrate and download the audio without signing in.">
+  <meta property="og:description" content="Convert public Instagram Reels to MP3 at 192 kbps and download the audio without signing in.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Instagram Reel to MP3 Converter | ReelTone">
-  <meta name="twitter:description" content="Convert publicly accessible Instagram Reels to MP3 with bitrate options and temporary downloads.">
+  <meta name="twitter:description" content="Convert public Instagram Reels to MP3 at a consistent 192 kbps bitrate with temporary downloads.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://instagramreeltomp3converter.vercel.app/og-card.png">
   <meta property="og:image:secure_url" content="https://instagramreeltomp3converter.vercel.app/og-card.png">
@@ -38,7 +38,7 @@
     "@type": "WebApplication",
     "name": "ReelTone",
     "url": "https://instagramreeltomp3converter.vercel.app/",
-    "description": "Convert publicly accessible Instagram Reels and video posts into MP3 audio at 128, 192, 256, or 320 kbps.",
+    "description": "Convert publicly accessible Instagram Reels and video posts into MP3 audio at a consistent 192 kbps bitrate.",
     "image": "https://instagramreeltomp3converter.vercel.app/og-card.png",
     "applicationCategory": "MultimediaApplication",
     "operatingSystem": "Any",
@@ -114,7 +114,7 @@
         <p class="hero-subtitle">Convert a public Instagram Reel to MP3 in a few steps. No account needed.</p>
 
         <div class="trust-row" aria-label="Converter details">
-          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>128 / 192 / 256 / 320 kbps</span>
+          <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>192 kbps default</span>
           <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>10-minute downloads</span>
         </div>
       </div>
@@ -138,23 +138,13 @@
 
           <div class="quality-row">
             <div class="quality-copy">
-              <span class="field-label" id="quality-label">AUDIO QUALITY</span>
-              <span>Balance file size and audio quality</span>
+              <span class="field-label" id="quality-label">MP3 OUTPUT</span>
+              <span>One consistent default for every download</span>
             </div>
-            <input type="hidden" id="quality" name="quality" value="192">
-            <div class="quality-select" id="quality-select">
-              <button class="quality-trigger" id="quality-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="quality-options" aria-labelledby="quality-label quality-current">
-                <span id="quality-current">192 kbps</span>
-                <svg class="quality-chevron" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m5 7.5 5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              </button>
-              <div class="quality-options" id="quality-options" role="listbox" aria-labelledby="quality-label" hidden>
-                <button class="quality-option" type="button" role="option" data-quality="128" aria-selected="false" tabindex="-1"><span><strong>128 kbps</strong><small>Smaller file</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-                <button class="quality-option" type="button" role="option" data-quality="192" aria-selected="true" tabindex="-1"><span><strong>192 kbps</strong><small>Balanced quality</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-                <button class="quality-option" type="button" role="option" data-quality="256" aria-selected="false" tabindex="-1"><span><strong>256 kbps</strong><small>High quality</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-                <button class="quality-option" type="button" role="option" data-quality="320" aria-selected="false" tabindex="-1"><span><strong>320 kbps</strong><small>Highest bitrate</small></span><span class="quality-option-mark" aria-hidden="true">✓</span></button>
-              </div>
+            <div class="quality-fixed" aria-labelledby="quality-label">
+              <span class="quality-fixed-value">192 kbps</span>
+              <span class="quality-fixed-note">Default</span>
             </div>
-            <span class="visually-hidden" id="quality-status" role="status" aria-live="polite"></span>
           </div>
 
           <button class="convert-button" id="convert-button" type="submit">
@@ -224,7 +214,7 @@
           <div class="step-number">02</div>
           <div class="step-icon"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12h2l2-5 4 10 3-8 2 3h3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
           <h3>Pick your sound</h3>
-          <p>Choose the MP3 bitrate you want, then let the converter work.</p>
+          <p>The audio is encoded at a consistent 192 kbps bitrate.</p>
         </article>
         <article class="step-item">
           <div class="step-number">03</div>

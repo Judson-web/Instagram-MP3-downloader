@@ -32,9 +32,8 @@ const ffmpegPath: string | null = require("ffmpeg-static") as string | null;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const MAX_DURATION_SECONDS = 20 * 60;
-const MAX_REQUESTS_PER_HOUR = 8;
+const MAX_REQUESTS_PER_HOUR = 20;
 const PROCESS_TIMEOUT_MS = 45 * 1000;
-const QUALITY_PRESETS = new Set(["128", "192", "256", "320"]);
 const ALLOWED_HOSTS = new Set([
   "instagram.com",
   "www.instagram.com",
@@ -276,9 +275,9 @@ function makeIpHash(ip: string): string {
 }
 
 
-const DEFAULT_SOURCE_COOLDOWN_SECONDS = 300;
+const DEFAULT_SOURCE_COOLDOWN_SECONDS = 60;
 const MAX_SOURCE_COOLDOWN_SECONDS = 3600;
-type SourceCooldownKey = "instagram" | "resolver" | "easydown" | "gallery-dl" | "instagrapi";
+type SourceCooldownKey = "instagram" | "resolver" | "easydown" | "gallery-dl" | "instagrapi" | "cobalt-primary" | "cobalt-secondary" | "apify";
 const localSourceCooldowns = new Map<SourceCooldownKey, { until: number; strikeCount: number }>();
 
 function parseRetryAfterSeconds(value: string | null | undefined): number | undefined {
@@ -299,8 +298,20 @@ async function getSourceCooldownSeconds(source: SourceCooldownKey): Promise<numb
     const current = localSourceCooldowns.get(source);
     return current ? Math.max(0, Math.ceil((current.until - Date.now()) / 1000)) : 0;
   }
+  // Older versions exponentially extended a source cooldown for up to an hour.
+  // Clamp those legacy rows (strike_count > 1) to at most one minute from their
+  // last update. New rows always store strike_count=1, preserving explicit
+  // Retry-After values without the old escalation behavior.
   const rows = await (sql`
-    SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM (cooldown_until - now()))))::int AS remaining_seconds
+    SELECT GREATEST(
+      0,
+      CEIL(EXTRACT(EPOCH FROM (
+        CASE WHEN strike_count > 1
+          THEN LEAST(cooldown_until, updated_at + interval '60 seconds')
+          ELSE cooldown_until
+        END - now()
+      )))
+    )::int AS remaining_seconds
     FROM reeltone_source_cooldowns
     WHERE cooldown_key = ${source} AND cooldown_until > now()
     LIMIT 1
@@ -309,35 +320,25 @@ async function getSourceCooldownSeconds(source: SourceCooldownKey): Promise<numb
 }
 
 async function registerSourceCooldown(source: SourceCooldownKey, retryAfterSeconds?: number): Promise<number> {
-  const requested = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, Math.max(1, Math.ceil(retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS)));
+  // Use the upstream Retry-After when present, otherwise a short 60-second
+  // cooldown. Do not exponentially escalate: independent providers are tried
+  // separately and each source gets its own cooldown key.
+  const duration = Math.min(
+    MAX_SOURCE_COOLDOWN_SECONDS,
+    Math.max(1, Math.ceil(retryAfterSeconds ?? DEFAULT_SOURCE_COOLDOWN_SECONDS))
+  );
   const sql = getSql();
   if (!sql) {
-    const previous = localSourceCooldowns.get(source);
-    const isActive = !!previous && previous.until > Date.now();
-    const strikeCount = previous ? (isActive ? previous.strikeCount : Math.min(8, previous.strikeCount + 1)) : 1;
-    const backoff = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, DEFAULT_SOURCE_COOLDOWN_SECONDS * (2 ** (strikeCount - 1)));
-    const duration = Math.max(requested, backoff);
-    localSourceCooldowns.set(source, { until: Math.max(previous?.until || 0, Date.now() + duration * 1000), strikeCount });
-    return Math.max(1, Math.ceil((localSourceCooldowns.get(source)!.until - Date.now()) / 1000));
+    const until = Date.now() + duration * 1000;
+    localSourceCooldowns.set(source, { until, strikeCount: 1 });
+    return duration;
   }
-
-  const existing = await (sql`
-    SELECT strike_count, (cooldown_until > now()) AS active
-    FROM reeltone_source_cooldowns
-    WHERE cooldown_key = ${source}
-    LIMIT 1
-  ` as unknown as Promise<Array<{ strike_count: number; active: boolean }>>);
-  const oldStrikeCount = Number(existing[0]?.strike_count || 0);
-  const stillActive = existing[0]?.active === true;
-  const strikeCount = oldStrikeCount === 0 ? 1 : (stillActive ? oldStrikeCount : Math.min(8, oldStrikeCount + 1));
-  const backoff = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, DEFAULT_SOURCE_COOLDOWN_SECONDS * (2 ** (strikeCount - 1)));
-  const duration = Math.max(requested, backoff);
   await sql`
     INSERT INTO reeltone_source_cooldowns (cooldown_key, cooldown_until, strike_count, updated_at)
-    VALUES (${source}, now() + (${duration} * interval '1 second'), ${strikeCount}, now())
+    VALUES (${source}, now() + (${duration} * interval '1 second'), 1, now())
     ON CONFLICT (cooldown_key) DO UPDATE SET
-      cooldown_until = GREATEST(reeltone_source_cooldowns.cooldown_until, EXCLUDED.cooldown_until),
-      strike_count = GREATEST(reeltone_source_cooldowns.strike_count, EXCLUDED.strike_count),
+      cooldown_until = EXCLUDED.cooldown_until,
+      strike_count = 1,
       updated_at = now()
   `;
   return await getSourceCooldownSeconds(source) || duration;
@@ -347,12 +348,20 @@ function sourceCooldownError(res: Response, source: SourceCooldownKey, remaining
   const seconds = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, Math.max(1, Math.ceil(remainingSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS)));
   const isInstagram = source === "instagram";
   const isResolver = source === "resolver";
+  const isApify = source === "apify";
+  const isCobalt = source === "cobalt-primary" || source === "cobalt-secondary";
   const code: ApiErrorCode = isInstagram ? "INSTAGRAM_RATE_LIMITED" : (isResolver ? "RESOLVER_RATE_LIMITED" : "PROVIDER_RATE_LIMITED");
-  const title = isInstagram ? "Instagram is temporarily limiting requests" :
-    (isResolver ? "The link lookup service is cooling down" : "The media provider is cooling down");
+  const title = isInstagram ? "Direct Instagram access is cooling down" :
+    (isResolver ? "The link lookup service is cooling down" :
+      (isCobalt ? "A media extraction provider is cooling down" :
+        (isApify ? "The optional Apify provider is cooling down" : "The media provider is cooling down")));
   const error = isInstagram
-    ? "ReelTone has paused further Instagram requests to respect the source limit. Wait for the cooldown instead of retrying repeatedly."
-    : "ReelTone has paused requests to this lookup provider and will avoid calling it again until its cooldown expires.";
+    ? "Direct Instagram requests are paused briefly. Cached downloads and independent configured providers remain available."
+    : isCobalt
+      ? "This Cobalt instance is paused briefly; the other configured provider can still be used."
+      : isApify
+        ? "Apify returned a provider limit. ReelTone pauses that provider briefly and keeps other extraction paths available."
+        : "ReelTone has briefly paused requests to this provider; other configured providers remain available.";
   return sendApiError(res, 503, {
     code, title, error, retryable: true, category: "rate-limit", retryAfterSeconds: seconds
   });
@@ -984,6 +993,304 @@ async function embedMp3Metadata(
   });
 }
 
+interface ApifyInstagramReelItem {
+  url?: string;
+  shortCode?: string;
+  shortcode?: string;
+  videoUrl?: string;
+  video_url?: string;
+  audioUrl?: string;
+  audio_url?: string;
+  videoDuration?: number | string;
+  video_duration?: number | string;
+  durationSeconds?: number | string;
+  duration?: number | string;
+  caption?: string;
+  ownerUsername?: string;
+  ownerFullName?: string;
+  error?: string;
+}
+
+function getConfiguredApifyToken(): string | null {
+  const token = process.env.APIFY_API_TOKEN?.trim();
+  return token || null;
+}
+
+function cleanProviderMetadata(value: unknown, maximum: number): string {
+  return String(value || "")
+    .replace(/[\r\n\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maximum);
+}
+
+/**
+ * Optional paid public-media extractor. The actor is explicitly capped to one
+ * result and $0.05 per run. Its API token is sent only to api.apify.com; media
+ * downloads use a separate request with no provider credentials or Instagram
+ * session cookies attached.
+ */
+async function tryApifyReelToMp3(
+  sourceUrl: string,
+  shortcode: string,
+  directory: string,
+  outputPath: string,
+  quality: QualityPreset,
+  parentSignal: AbortSignal,
+  setProcess: ProcessSetter
+): Promise<ConversionAttempt> {
+  const token = getConfiguredApifyToken();
+  if (!token) return { ok: false, reason: "apify-not-configured" };
+
+  const sourcePath = path.join(directory, "apify-source.bin");
+  fs.rmSync(sourcePath, { force: true });
+
+  try {
+    const endpoint = new URL(
+      "https://api.apify.com/v2/acts/apify~instagram-reel-scraper/run-sync-get-dataset-items"
+    );
+    endpoint.searchParams.set("timeout", "50");
+    endpoint.searchParams.set("maxItems", "1");
+    endpoint.searchParams.set("maxTotalChargeUsd", "0.05");
+    endpoint.searchParams.set("format", "json");
+
+    const actorResponse = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        username: [sourceUrl],
+        resultsLimit: 1,
+        includeDownloadedVideo: false,
+        includeTranscript: false,
+        includeSharesCount: false
+      }),
+      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(55000)])
+    });
+
+    if (parentSignal.aborted) {
+      await actorResponse.body?.cancel().catch(() => {});
+      return { ok: false, reason: "cancelled" };
+    }
+    if (actorResponse.status === 429) {
+      await actorResponse.body?.cancel().catch(() => {});
+      return {
+        ok: false,
+        reason: "apify-rate-limited",
+        retryAfterSeconds: parseRetryAfterSeconds(actorResponse.headers.get("retry-after")),
+        diagnostic: "apify-http-429"
+      };
+    }
+    if ([401, 403].includes(actorResponse.status)) {
+      await actorResponse.body?.cancel().catch(() => {});
+      return { ok: false, reason: "apify-auth-failed", diagnostic: "apify-http-" + actorResponse.status };
+    }
+    if (!actorResponse.ok) {
+      await actorResponse.body?.cancel().catch(() => {});
+      return {
+        ok: false,
+        reason: "apify-http-" + actorResponse.status,
+        diagnostic: "apify-http-" + actorResponse.status
+      };
+    }
+
+    const payload: unknown = await actorResponse.json().catch(() => null);
+    const items: ApifyInstagramReelItem[] = Array.isArray(payload)
+      ? payload as ApifyInstagramReelItem[]
+      : (payload && typeof payload === "object" && Array.isArray((payload as { items?: unknown }).items)
+        ? (payload as { items: ApifyInstagramReelItem[] }).items
+        : []);
+    if (!items.length) return { ok: false, reason: "apify-no-media" };
+
+    const itemCode = (item: ApifyInstagramReelItem): string => {
+      const value = item.shortCode || item.shortcode || "";
+      if (value) return value;
+      try {
+        const parsed = new URL(String(item.url || ""));
+        return parsed.pathname.match(/\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1] || "";
+      } catch {
+        return "";
+      }
+    };
+    const item = items.find((candidate) => itemCode(candidate) === shortcode) ||
+      (items.length === 1 && !itemCode(items[0]) ? items[0] : undefined);
+    if (!item) return { ok: false, reason: "apify-no-media", diagnostic: "apify-shortcode-mismatch" };
+
+    const durationRaw = item.videoDuration ?? item.video_duration ?? item.durationSeconds ?? item.duration;
+    const duration = Number(durationRaw);
+    if (Number.isFinite(duration) && duration > MAX_DURATION_SECONDS) {
+      return { ok: false, reason: "duration-limit" };
+    }
+
+    const candidates = [...new Set([
+      item.videoUrl,
+      item.video_url,
+      item.audioUrl,
+      item.audio_url
+    ].filter((value): value is string => typeof value === "string" && value.length > 0))]
+      .filter((value) => isAllowedMediaAsset(value))
+      .slice(0, 3);
+    if (!candidates.length) {
+      const isPrivate = /private|login required|login_required/i.test(String(item.error || ""));
+      return { ok: false, reason: isPrivate ? "login-required" : "apify-no-media" };
+    }
+
+    let downloaded = false;
+    let lastMediaFailure = "apify-media-unavailable";
+    for (const candidate of candidates) {
+      let current: URL;
+      try { current = new URL(candidate); }
+      catch { continue; }
+
+      let accepted = false;
+      let responseContentType = "";
+      for (let redirects = 0; redirects <= 3; redirects++) {
+        if (!isAllowedMediaAsset(current.toString())) {
+          lastMediaFailure = "apify-untrusted-media-host";
+          break;
+        }
+        let mediaResponse: globalThis.Response;
+        try {
+          mediaResponse = await fetch(current, {
+            method: "GET",
+            redirect: "manual",
+            headers: {
+              "User-Agent": INSTAGRAM_BROWSER_UA,
+              "Referer": "https://www.instagram.com/",
+              "Accept": "video/mp4,video/*,audio/*,application/octet-stream,*/*;q=0.4"
+            },
+            signal: AbortSignal.any([parentSignal, AbortSignal.timeout(45000)])
+          });
+        } catch (error) {
+          if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+          lastMediaFailure = /timeout/i.test(errorName(error)) ? "apify-media-timeout" : "apify-media-network-error";
+          break;
+        }
+
+        if (parentSignal.aborted) {
+          await mediaResponse.body?.cancel().catch(() => {});
+          return { ok: false, reason: "cancelled" };
+        }
+        if ([301, 302, 303, 307, 308].includes(mediaResponse.status)) {
+          const location = mediaResponse.headers.get("location");
+          await mediaResponse.body?.cancel().catch(() => {});
+          if (!location || redirects === 3) {
+            lastMediaFailure = "apify-media-redirect-failed";
+            break;
+          }
+          try { current = new URL(location, current); }
+          catch { lastMediaFailure = "apify-media-redirect-failed"; break; }
+          continue;
+        }
+        if (mediaResponse.status === 429) {
+          await mediaResponse.body?.cancel().catch(() => {});
+          return {
+            ok: false,
+            reason: "instagram-rate-limited",
+            retryAfterSeconds: parseRetryAfterSeconds(mediaResponse.headers.get("retry-after")),
+            diagnostic: "apify-cdn-http-429"
+          };
+        }
+        if (!mediaResponse.ok || !mediaResponse.body) {
+          lastMediaFailure = "apify-media-http-" + mediaResponse.status;
+          await mediaResponse.body?.cancel().catch(() => {});
+          break;
+        }
+
+        responseContentType = String(mediaResponse.headers.get("content-type") || "").split(";", 1)[0].toLowerCase();
+        if (
+          responseContentType.startsWith("text/") ||
+          responseContentType.includes("application/json") ||
+          (!responseContentType.startsWith("video/") &&
+            !responseContentType.startsWith("audio/") &&
+            !responseContentType.includes("octet-stream") &&
+            !current.pathname.toLowerCase().match(/\.(?:mp4|m4v|mov|webm|m4a|mp3|aac|ogg|opus)$/))
+        ) {
+          await mediaResponse.body.cancel().catch(() => {});
+          lastMediaFailure = "apify-media-not-media";
+          break;
+        }
+
+        const contentLength = Number(mediaResponse.headers.get("content-length") || 0);
+        if (contentLength > MAX_SOURCE_BYTES) {
+          await mediaResponse.body.cancel().catch(() => {});
+          return { ok: false, reason: "media-too-large" };
+        }
+
+        let downloadedBytes = 0;
+        const limiter = new Transform({
+          transform(chunk: Buffer, _encoding, callback) {
+            downloadedBytes += chunk.length;
+            if (downloadedBytes > MAX_SOURCE_BYTES) callback(new Error("source media exceeded the size limit"));
+            else callback(null, chunk);
+          }
+        });
+        fs.rmSync(sourcePath, { force: true });
+        try {
+          await pipeline(
+            readableFromWeb(mediaResponse.body),
+            limiter,
+            fs.createWriteStream(sourcePath, { flags: "wx" }),
+            { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(45000)]) }
+          );
+        } catch (error) {
+          fs.rmSync(sourcePath, { force: true });
+          if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+          if (/size limit/.test(errorMessage(error))) return { ok: false, reason: "media-too-large" };
+          lastMediaFailure = /timeout/i.test(errorName(error)) ? "apify-media-timeout" : "apify-media-download-failed";
+          break;
+        }
+
+        if (!fs.existsSync(sourcePath) || fs.statSync(sourcePath).size < 128) {
+          fs.rmSync(sourcePath, { force: true });
+          lastMediaFailure = "apify-empty-media";
+          break;
+        }
+        accepted = true;
+        downloaded = true;
+        break;
+      }
+      if (accepted) break;
+    }
+
+    if (!downloaded) return { ok: false, reason: lastMediaFailure };
+
+    // Use the same bounded FFmpeg path as the existing providers so the output
+    // is always re-encoded to the single 192 kbps default.
+    await encodeDownloadedVideo(
+      sourcePath,
+      outputPath,
+      quality,
+      parentSignal,
+      setProcess
+    );
+    if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 128) {
+      fs.rmSync(outputPath, { force: true });
+      return { ok: false, reason: "apify-no-mp3" };
+    }
+
+    const title = cleanProviderMetadata(item.caption || "Instagram Reel " + shortcode, 180);
+    const author = cleanProviderMetadata(item.ownerUsername || item.ownerFullName || "", 80);
+    return { ok: true, reason: "apify", title, author };
+  } catch (error) {
+    if (parentSignal.aborted) return { ok: false, reason: "cancelled" };
+    if (/timeout/i.test(errorName(error))) {
+      return { ok: false, reason: "apify-timeout", diagnostic: "apify-request-timeout" };
+    }
+    return {
+      ok: false,
+      reason: "apify-unavailable",
+      diagnostic: errorName(error).replace(/[^a-z0-9._:-]/gi, "").slice(0, 64)
+    };
+  } finally {
+    fs.rm(sourcePath, { force: true }, () => {});
+  }
+}
+
+
 async function tryPublicResolverToMp3(sourceUrl: string, directory: string, outputPath: string, quality: QualityPreset, parentSignal: AbortSignal, setProcess: ProcessSetter, resolverEndpoint: string): Promise<ConversionAttempt> {
   const inputPath = path.join(directory, "resolver-source.mp4");
   try {
@@ -1458,7 +1765,8 @@ async function tryCobaltToMp3(
             audioFormat: "mp3",
             audioBitrate: cobaltBitrate,
             filenameStyle: "basic",
-            alwaysProxy: true,
+            // Prefer direct signed URLs where Cobalt supports them; tunnel only when needed.
+            alwaysProxy: false,
             localProcessing: "disabled"
           }),
           // A dedicated API may be waking from idle. Allow it time to start,
@@ -1911,7 +2219,7 @@ app.get("/api/health", async (_req: Request, res: Response) => {
     const sql = getSql();
     if (!sql) throw new Error("DATABASE_URL is not configured");
     await sql`SELECT 1 AS ok`;
-    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!getConfiguredCobaltEndpoint(), impersonatedYtDlpConfigured: !!getConfiguredImpersonatedExtractorUrl(), audioCacheConfigured: !!getPrivateBlobSdk(), easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
+    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!getConfiguredCobaltEndpoint(), impersonatedYtDlpConfigured: !!getConfiguredImpersonatedExtractorUrl(), apifyConfigured: !!getConfiguredApifyToken(), audioCacheConfigured: !!getPrivateBlobSdk(), easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
   } catch {
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "Service health check failed", error: "The application is live, but its dedicated Neon database is not reachable.", retryable: true, category: "service" });
   }
@@ -1932,19 +2240,16 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   const validated = validateInstagramUrl(req.body?.url);
   if (validated.ok === false) return sendApiError(res, 400, { code: "INVALID_URL", title: "Check your Instagram link", error: validated.reason, retryable: false, category: "input" });
 
-  const requestedQuality = String(req.body?.quality || "192");
-  if (!QUALITY_PRESETS.has(requestedQuality)) {
-    return sendApiError(res, 400, { code: "INVALID_QUALITY", title: "Choose an audio quality", error: "Select 128, 192, 256, or 320 kbps, then start the conversion again.", retryable: false, category: "input" });
-  }
-
-  const quality = requestedQuality as QualityPreset;
+  // ReelTone now uses a single fixed output bitrate for predictable results.
+  // Ignore legacy client values so API callers cannot reintroduce the picker.
+  const quality: QualityPreset = "192";
 
   // Count requests per visitor first; then let cached audio bypass Instagram's
   // global cooldown. Re-downloading an already converted Reel should not touch
   // Instagram again, and the cache stores files privately rather than publishing URLs.
   try {
     if (!(await checkRateLimit(clientKey(req)))) {
-      return sendApiError(res, 429, { code: "RATE_LIMITED", title: "Hourly conversion limit reached", error: "This site allows eight conversion attempts per hour per visitor. Please wait for the limit to reset before trying again.", retryable: true, category: "rate-limit" });
+      return sendApiError(res, 429, { code: "RATE_LIMITED", title: "Hourly conversion limit reached", error: "This site allows 20 conversion attempts per hour per visitor. Please wait for the limit to reset before trying again.", retryable: true, category: "rate-limit" });
     }
   } catch (error) {
     console.error("Rate-limit database is unavailable:", errorName(error) || "unknown error");
@@ -2078,6 +2383,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   let publicFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicResolver: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let impersonatedFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
+  let apifyFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let extractorError: unknown = null;
   let stageStartedAt = Date.now();
   const stageSummary: string[] = [];
@@ -2091,14 +2397,19 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   };
 
   try {
-    // Cobalt is the preferred extractor. If its stream URL fails, give configured
-    // secondary instances a chance before switching extraction strategies.
-    if (instagramDirectBlocked) {
-      cobaltFallback = { ok: false, reason: "instagram-cooldown-active", retryAfterSeconds: instagramCooldownAtStart };
-      recordStage("cobalt", "skipped-instagram-cooldown");
-    } else {
+    // These Cobalt instances are independent providers. Direct Instagram's
+    // cooldown should not suppress them; track each provider separately.
+    {
       for (let endpointIndex = 0; endpointIndex < cobaltEndpoints.length; endpointIndex++) {
       const endpoint = cobaltEndpoints[endpointIndex];
+      const providerSource: SourceCooldownKey = endpointIndex === 0 ? "cobalt-primary" : "cobalt-secondary";
+      let providerCooldown = 0;
+      try { providerCooldown = await getSourceCooldownSeconds(providerSource); } catch { providerCooldown = 0; }
+      if (providerCooldown > 0) {
+        cobaltFallback = { ok: false, reason: "cobalt-provider-cooldown", retryAfterSeconds: providerCooldown };
+        recordStage(endpointIndex === 0 ? "cobalt-primary" : "cobalt-fallback-" + endpointIndex, "skipped-provider-cooldown");
+        continue;
+      }
       cobaltFallback = await tryCobaltToMp3(
         validated.url,
         directory,
@@ -2114,6 +2425,9 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       );
       if (cobaltFallback.reason === "instagram-rate-limited") {
         sawCobaltInstagramRateLimit = true;
+      }
+      if (cobaltFallback.reason === "instagram-rate-limited" || cobaltFallback.reason === "cobalt-rate-limited") {
+        await registerSourceCooldown(providerSource, cobaltFallback.retryAfterSeconds);
       }
 
       if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
@@ -2138,11 +2452,11 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       // egress. Give one separately hosted secondary instance a single chance,
       // but never keep rotating providers after the second instance responds.
       if (
-        cobaltFallback.reason === "instagram-rate-limited" &&
+        (cobaltFallback.reason === "instagram-rate-limited" || cobaltFallback.reason === "cobalt-rate-limited") &&
         endpointIndex === 0 &&
         cobaltEndpoints.length > 1
       ) {
-        recordStage("cobalt-primary", "source-limited-trying-independent-instance");
+        recordStage("cobalt-primary", "cooldown-recorded-trying-independent-instance");
         continue;
       }
 
@@ -2156,7 +2470,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     }
 
     if (!cobaltFallback.ok &&
-        !["not-attempted", "cobalt-not-configured", "cobalt-no-media", "instagram-cooldown-active"].includes(cobaltFallback.reason)) {
+        !["not-attempted", "cobalt-not-configured", "cobalt-no-media", "instagram-cooldown-active", "cobalt-provider-cooldown"].includes(cobaltFallback.reason)) {
       const safeDiagnostic = String(cobaltFallback.diagnostic || "")
         .replace(/[^a-z0-9._:-]/gi, "").slice(0, 64);
       console.warn("ReelTone Cobalt fallback failed:", cobaltFallback.reason, safeDiagnostic);
@@ -2257,6 +2571,51 @@ app.post("/api/convert", async (req: Request, res: Response) => {
           String(impersonatedFallback.diagnostic || "").replace(/[^a-z0-9._:-]/gi, "").slice(0, 64)
         );
       }
+    }
+
+    // Apify is an optional independent provider. It remains eligible even when
+    // direct Instagram requests are cooling down, and each run has a small cost cap.
+    let apifyProviderCooldown = 0;
+    try { apifyProviderCooldown = await getSourceCooldownSeconds("apify"); } catch { apifyProviderCooldown = 0; }
+    apifyFallback = apifyProviderCooldown > 0
+      ? { ok: false, reason: "apify-provider-cooldown", retryAfterSeconds: apifyProviderCooldown }
+      : await tryApifyReelToMp3(
+          validated.url,
+          validated.url.match(/\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1] || "",
+          directory,
+          outputPath,
+          quality,
+          fallbackController.signal,
+          (process) => { fallbackChild = process; }
+        );
+    recordStage("apify-instagram", apifyFallback.reason);
+    if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
+      cleanup();
+      return;
+    }
+    if (apifyFallback.reason === "apify-rate-limited") {
+      apifyFallback.retryAfterSeconds = await registerSourceCooldown("apify", apifyFallback.retryAfterSeconds);
+    }
+    if (apifyFallback.reason === "instagram-rate-limited") {
+      instagramCooldownAtStart = await registerSourceCooldown("instagram", apifyFallback.retryAfterSeconds);
+      instagramDirectBlocked = true;
+    }
+    if (apifyFallback.ok && fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 128) {
+      audioTitle = apifyFallback.title || audioTitle;
+      audioAuthor = apifyFallback.author || audioAuthor;
+      await streamResult();
+      return;
+    }
+    if (apifyFallback.reason === "duration-limit") {
+      cleanup();
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" });
+    }
+    if (apifyFallback.reason === "media-too-large") {
+      cleanup();
+      return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
+    }
+    if (apifyFallback.reason !== "apify-not-configured" && apifyFallback.reason !== "apify-provider-cooldown" && !apifyFallback.ok) {
+      console.warn("ReelTone Apify fallback failed:", String(apifyFallback.reason || "unknown").replace(/[^a-z0-9._:-]/gi, "").slice(0, 64));
     }
 
     if (!(await shouldSkipDirectInstagram())) {
@@ -2586,6 +2945,8 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     stageSummary.join(" "),
     impersonatedFallback.reason,
     impersonatedFallback.diagnostic || "",
+    apifyFallback.reason,
+    apifyFallback.diagnostic || "",
     cobaltFallback.reason,
     cobaltFallback.diagnostic || "",
     providerFallback.reason,
@@ -2600,6 +2961,17 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   if (/(?:http error 429|429 too many requests|instagram-rate-limited|please wait a few minutes before you try again|instagram.{0,80}rate.?limit)/i.test(diagnosticText)) {
     const seconds = await registerSourceCooldown("instagram");
     return sourceCooldownError(res, "instagram", seconds);
+  }
+  if (["apify-rate-limited", "apify-provider-cooldown"].includes(apifyFallback.reason)) {
+    const seconds = (await getSourceCooldownSeconds("apify")) || apifyFallback.retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS;
+    return sourceCooldownError(res, "apify", seconds);
+  }
+  if (["cobalt-rate-limited", "cobalt-provider-cooldown"].includes(cobaltFallback.reason)) {
+    const source = cobaltFallback.reason === "cobalt-provider-cooldown" && cobaltEndpoints.length > 1
+      ? "cobalt-secondary"
+      : "cobalt-primary";
+    const seconds = (await getSourceCooldownSeconds(source)) || cobaltFallback.retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS;
+    return sourceCooldownError(res, source, seconds);
   }
   if (["resolver-rate-limited", "resolver-cooldown"].includes(publicResolver.reason)) {
     const seconds = (await getSourceCooldownSeconds("resolver")) || publicResolver.retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS;

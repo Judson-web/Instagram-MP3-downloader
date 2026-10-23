@@ -15,13 +15,13 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 ## Features
 
 - Convert publicly accessible Reel and video-post URLs into MP3.
-- Choose 128, 192, 256, or 320 kbps.
+- Encode every download at one consistent 192 kbps MP3 bitrate.
 - Embed title and creator ID3 tags in downloaded MP3s, plus Reel cover art when Instagram exposes a safe, public thumbnail. Artwork lookup is best-effort on the primary provider too, with a short timeout so it never blocks an otherwise valid download.
 - Cache successful MP3s privately for up to 24 hours, allowing repeats to bypass Instagram extraction while keeping cached objects private.
 - Use yt-dlp's metadata and thumbnail post-processors as part of the independent extractor fallback.
-- Use the latest stable `gallery-dl` extractor as an independent public-media fallback. When Cobalt reports Instagram's `error.api.fetch.rate` or a shared Instagram cooldown is active, make one gallery-dl-only attempt on the separate extractor service rather than replaying GraphQL, HTML, and both yt-dlp profiles.
+- Keep direct-source, Cobalt-instance, Apify, gallery-dl, and Instagrapi cooldowns independent so one limited provider does not suppress unrelated fallbacks.
 - During an active Instagram cooldown, reuse private cached output first, then try configured external providers while direct Instagram fetches remain paused.
-- Compact, keyboard-accessible bitrate picker with four presets and concise quality labels.
+- A simple, single-quality interface with no bitrate picker.
 - Light and dark themes with a remembered preference.
 - Temporary browser download that expires after ten minutes.
 - Clear, specific messages for invalid or unavailable links.
@@ -72,17 +72,20 @@ The service health check confirms the app can connect to its database. It does n
 
 ## Resolver and URL privacy
 
-When `COBALT_API_URL` and a Cobalt API key are configured, ReelTone tries that dedicated extractor first and sends it the submitted Instagram URL. The optional `COBALT_API_FALLBACK_URLS` list adds failover instances that accept the same key; a secondary instance is tried only when the previous one encounters a transport or media-download failure, not to evade explicit rate limits or source restrictions. Use only instances you control or trust and review their data-handling policies.
+When `COBALT_API_URL` and a Cobalt API key are configured, ReelTone tries that dedicated extractor first and sends it the submitted Instagram URL. `COBALT_API_FALLBACK_URLS` can add a separately hosted Cobalt instance. Each instance has its own cooldown; a direct Instagram cooldown no longer suppresses the Cobalt chain. Failover is bounded to the configured primary and one secondary, and is for reliability rather than proxy rotation.
 
-The generic media resolver is disabled unless `MEDIA_RESOLVER_URL` is configured to a trusted HTTPS endpoint. The optional EasyDown integration requires `EASYDOWN_API_TOKEN`. Each enabled provider receives the submitted URL when its fallback stage is reached. If those stages are not configured or unavailable, ReelTone continues with public Instagram page/embed parsing and the local yt-dlp/FFmpeg path. Provider health does not guarantee that Instagram will expose a playable stream for every public-looking link.
+The optional `APIFY_API_TOKEN` enables the official Apify Instagram Reel Scraper as an independent fallback when Cobalt and the Render extractor do not return playable media. It runs only on the server, accepts public Reel links, requests at most one item, caps each actor run to US$0.05, and downloads only media hosted by allow-listed Instagram CDN domains. The token is never sent to Instagram or to media CDN hosts. Apify is a paid service and its availability, output schema, and pricing can change; leave the variable unset to disable it.
+
+The generic media resolver is disabled unless `MEDIA_RESOLVER_URL` is configured to a trusted HTTPS endpoint. The optional EasyDown integration requires `EASYDOWN_API_TOKEN`. Each enabled provider receives the submitted URL when its fallback stage is reached. Provider health does not guarantee Instagram will expose a playable stream for every public-looking link.
+
+ReelTone produces a single MP3 output at **192 kbps**. Bitrate selection has been removed from the user interface and server requests are normalized to the same fixed output bitrate.
 
 MP3 download filenames contain a UTC timestamp and random suffix, helping avoid collisions between files with identical titles.
-
 ## Security
 
 The deployment applies a nonce-based Content Security Policy, HSTS, anti-framing controls, MIME-sniffing protection, a restrictive Permissions Policy, and cross-origin response policies. Visitor rate-limit identifiers are truncated to an IPv4 `/24` or IPv6 `/64` network prefix, then pseudonymized using keyed HMAC-SHA-256 with a production secret of at least 32 bytes. Raw client IPs and truncated network prefixes are not stored as rate-limit keys.
 
-The `reeltone_source_cooldowns` table keeps upstream rate-limit cooldowns shared across Vercel instances. When a source returns a 429, ReelTone honors `Retry-After` when available, otherwise applies an escalating cooldown, sends a `Retry-After` response header, and disables repeated user retries until the cooldown expires. This reduces needless requests; it does not bypass limits enforced by Instagram or a media provider. The server also validates submitted URLs and constrains media processing.
+The `reeltone_source_cooldowns` table keeps upstream rate-limit cooldowns shared across Vercel instances. When a source returns a 429, ReelTone honors `Retry-After` when available, otherwise applies a short 60-second cooldown, sends a `Retry-After` response header, and keeps independent provider cooldowns separate. Historical exponentially escalated rows are clamped to a minute so they do not trap the service in a long legacy cooldown. This reduces needless requests; it does not bypass limits enforced by Instagram or a media provider. The server also validates submitted URLs and constrains media processing.
 
 These safeguards reduce exposure but cannot make a public website perfectly secure. Keep dependencies updated and review configuration changes before deploying.
 
