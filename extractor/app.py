@@ -841,6 +841,20 @@ def _invalidate_instagrapi_client(
                 mode=mode,
                 retry_after=time.monotonic() + max(1, cooldown),
             )
+            auto_reauth = os.environ.get("INSTAGRAPI_AUTO_REAUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+            has_credentials = bool(
+                auto_reauth
+                and os.environ.get("INSTAGRAPI_USERNAME", "").strip()
+                and os.environ.get("INSTAGRAPI_PASSWORD", "")
+            )
+            if mode in {"expired-session", "challenge-required"} and not has_credentials:
+                # Never keep trying an old cached settings file after Instagram
+                # rejected it. Fall back to the deployment's configured bootstrap
+                # (environment settings/sessionid) after the cooldown instead.
+                try:
+                    INSTAGRAPI_SETTINGS_PATH.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
 
 def _refresh_instagrapi_client(client: object | None):
