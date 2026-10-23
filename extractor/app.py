@@ -714,7 +714,12 @@ def _build_instagrapi_client(require_renewal: bool = False):
     sessionid = os.environ.get("INSTAGRAPI_SESSIONID", "").strip()
     mode = "disabled"
 
-    if settings_raw or settings_b64:
+    if INSTAGRAPI_SETTINGS_PATH.is_file():
+        # Prefer newer session state saved by this worker over the original deploy
+        # seed. On a fresh Render instance the file is absent and env settings win.
+        client.load_settings(str(INSTAGRAPI_SETTINGS_PATH))
+        mode = "cached-settings"
+    elif settings_raw or settings_b64:
         settings = (
             json.loads(settings_raw)
             if settings_raw
@@ -724,9 +729,6 @@ def _build_instagrapi_client(require_renewal: bool = False):
             raise ValueError("invalid Instagrapi settings")
         client.set_settings(settings)
         mode = "settings"
-    elif INSTAGRAPI_SETTINGS_PATH.is_file():
-        client.load_settings(str(INSTAGRAPI_SETTINGS_PATH))
-        mode = "cached-settings"
     elif sessionid:
         try:
             client.login_by_sessionid(sessionid)
