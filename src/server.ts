@@ -1926,11 +1926,31 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "The converter is temporarily unavailable", error: "The rate-limit database could not be reached. No conversion was started; please try again shortly.", retryable: true, category: "service" });
   }
 
+  // Private cache hits can still be served during an Instagram cooldown.
   if (await serveCachedAudio(validated.url, quality, res)) return;
 
+  let instagramCooldownAtStart = 0;
+  let instagramDirectBlocked = false;
+  const shouldSkipDirectInstagram = async (): Promise<boolean> => {
+    if (instagramDirectBlocked) return true;
+    try {
+      const remaining = await getSourceCooldownSeconds("instagram");
+      if (remaining > 0) {
+        instagramCooldownAtStart = Math.max(instagramCooldownAtStart, remaining);
+        instagramDirectBlocked = true;
+        return true;
+      }
+      return false;
+    } catch {
+      // Fail closed for direct Instagram requests if the shared cooldown cannot be read.
+      instagramDirectBlocked = true;
+      return true;
+    }
+  };
+
   try {
-    const sourceCooldown = await getSourceCooldownSeconds("instagram");
-    if (sourceCooldown > 0) return sourceCooldownError(res, "instagram", sourceCooldown);
+    instagramCooldownAtStart = await getSourceCooldownSeconds("instagram");
+    instagramDirectBlocked = instagramCooldownAtStart > 0;
   } catch (error) {
     console.error("Source cooldown database is unavailable:", errorName(error) || "unknown error");
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "The converter is temporarily unavailable", error: "The source cooldown could not be checked. No new extraction was started; please try again shortly.", retryable: true, category: "service" });
@@ -1973,7 +1993,9 @@ app.post("/api/convert", async (req: Request, res: Response) => {
 
   const streamResult = async () => {
     const shortcode = new URL(validated.url).pathname.match(/^\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1];
-    const artwork = await tryGetInstagramArtwork(validated.url, directory, fallbackController.signal);
+    const artwork = (await shouldSkipDirectInstagram())
+      ? null
+      : await tryGetInstagramArtwork(validated.url, directory, fallbackController.signal);
     if (artwork?.title && (!audioTitle || /^instagram[_\s-]/i.test(audioTitle))) audioTitle = artwork.title;
     if (artwork?.author) audioAuthor = artwork.author;
 
@@ -2092,8 +2114,19 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       console.warn("ReelTone Cobalt fallback failed:", cobaltFallback.reason, safeDiagnostic);
     }
 
+    // Cobalt can return an Instagram CDN 429 on the actual media download.
+    // Treat that as a source cooldown, while distinguishing it from a 429 on
+    // Cobalt's own API so a provider quota does not globally block Instagram.
+    if (
+      cobaltFallback.reason === "cobalt-rate-limited" &&
+      /cobalt-download-http-429/i.test(String(cobaltFallback.diagnostic || ""))
+    ) {
+      instagramCooldownAtStart = await registerSourceCooldown("instagram", cobaltFallback.retryAfterSeconds);
+      instagramDirectBlocked = true;
+    }
+
     const impersonatedEndpoint = getConfiguredImpersonatedExtractorUrl();
-    if (impersonatedEndpoint) {
+    if (!(await shouldSkipDirectInstagram()) && impersonatedEndpoint) {
       impersonatedFallback = await tryImpersonatedYtDlpToMp3(
         validated.url,
         directory,
@@ -2105,9 +2138,10 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       recordStage("yt-dlp-impersonated", impersonatedFallback.reason);
 
       if (impersonatedFallback.reason === "impersonated-rate-limited") {
-        const seconds = await registerSourceCooldown("instagram", impersonatedFallback.retryAfterSeconds);
-        cleanup();
-        return sourceCooldownError(res, "instagram", seconds);
+        instagramCooldownAtStart = await registerSourceCooldown("instagram", impersonatedFallback.retryAfterSeconds);
+        instagramDirectBlocked = true;
+        // Continue to configured external providers below, but shouldSkipDirectInstagram()
+        // will prevent further direct Instagram requests in this same conversion.
       }
       if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
         cleanup();
@@ -2141,14 +2175,19 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       }
     }
 
-    publicFallback = await tryPublicHtmlToMp3(
-      validated.url,
-      directory,
-      outputPath,
-      quality,
-      fallbackController.signal,
-      (process) => { fallbackChild = process; }
-    );
+    if (!(await shouldSkipDirectInstagram())) {
+      publicFallback = await tryPublicHtmlToMp3(
+        validated.url,
+        directory,
+        outputPath,
+        quality,
+        fallbackController.signal,
+        (process) => { fallbackChild = process; }
+      );
+    } else {
+      publicFallback = { ok: false, reason: "instagram-cooldown-active", retryAfterSeconds: instagramCooldownAtStart };
+      recordStage("instagram-html", "skipped-cooldown");
+    }
     recordStage("instagram-html", publicFallback.reason);
 
     if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
@@ -2156,9 +2195,8 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       return;
     }
     if (publicFallback.reason === "instagram-rate-limited") {
-      const seconds = await registerSourceCooldown("instagram", publicFallback.retryAfterSeconds);
-      cleanup();
-      return sourceCooldownError(res, "instagram", seconds);
+      instagramCooldownAtStart = await registerSourceCooldown("instagram", publicFallback.retryAfterSeconds);
+      instagramDirectBlocked = true;
     }
     if (publicFallback.ok && fs.existsSync(outputPath)) {
       await streamResult();
@@ -2197,9 +2235,8 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       return;
     }
     if (providerFallback.reason === "instagram-rate-limited") {
-      const seconds = await registerSourceCooldown("instagram", providerFallback.retryAfterSeconds);
-      cleanup();
-      return sourceCooldownError(res, "instagram", seconds);
+      instagramCooldownAtStart = await registerSourceCooldown("instagram", providerFallback.retryAfterSeconds);
+      instagramDirectBlocked = true;
     }
     if (providerFallback.reason === "provider-rate-limited") {
       providerFallback.retryAfterSeconds = await registerSourceCooldown("easydown", providerFallback.retryAfterSeconds);
@@ -2250,9 +2287,8 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       return;
     }
     if (publicResolver.reason === "instagram-rate-limited") {
-      const seconds = await registerSourceCooldown("instagram", publicResolver.retryAfterSeconds);
-      cleanup();
-      return sourceCooldownError(res, "instagram", seconds);
+      instagramCooldownAtStart = await registerSourceCooldown("instagram", publicResolver.retryAfterSeconds);
+      instagramDirectBlocked = true;
     }
     if (publicResolver.reason === "resolver-rate-limited") {
       publicResolver.retryAfterSeconds = await registerSourceCooldown("resolver", publicResolver.retryAfterSeconds);
@@ -2273,11 +2309,12 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     }
     if (resolverEndpoint) console.warn("ReelTone optional resolver fallback failed:", String(publicResolver.reason || "unknown").slice(0, 80));
 
-    if (getConfiguredImpersonatedExtractorUrl()) {
+    if (await shouldSkipDirectInstagram()) {
+      recordStage("yt-dlp-local", "skipped-instagram-cooldown");
+    } else if (getConfiguredImpersonatedExtractorUrl()) {
       // The independent Python extractor has already tried anonymous GraphQL plus
-      // two bounded curl-cffi yt-dlp profiles. Running the standalone binary again
-      // duplicates requests from the same cloud region and was the final trigger
-      // for the avoidable Instagram 429 observed in production.
+      // bounded curl-cffi yt-dlp profiles. Running the standalone binary again
+      // duplicates requests from the same cloud region.
       recordStage("yt-dlp-local", "skipped-independent-impersonation-configured");
     } else {
       // Direct Instagram page/embed parsing has already run before optional providers.
@@ -2487,6 +2524,10 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   if (["provider-rate-limited", "provider-cooldown"].includes(providerFallback.reason)) {
     const seconds = (await getSourceCooldownSeconds("easydown")) || providerFallback.retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS;
     return sourceCooldownError(res, "easydown", seconds);
+  }
+  if (instagramCooldownAtStart > 0 || instagramDirectBlocked) {
+    const seconds = (await getSourceCooldownSeconds("instagram")) || instagramCooldownAtStart || DEFAULT_SOURCE_COOLDOWN_SECONDS;
+    return sourceCooldownError(res, "instagram", seconds);
   }
   const failure = classifyConversionFailure(failureEvidence, timedOut);
   return sendApiError(res, failure.status, failure.payload);

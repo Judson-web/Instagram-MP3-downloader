@@ -307,9 +307,13 @@ const byId = <T extends HTMLElement>(id: string): T => {
     let message = payload.error || payload.message || "Check that the Reel is publicly accessible, then try again.";
     if (cooldownCodes.includes(code) && Number(payload.retryAfterSeconds) > 0) {
       const seconds = Math.max(1, Math.ceil(Number(payload.retryAfterSeconds)));
-      const minutes = Math.ceil(seconds / 60);
-      const delayText = seconds < 60 ? seconds + (seconds === 1 ? " second." : " seconds.") : (minutes <= 1 ? "one minute." : minutes + " minutes.");
-      message += " Retry is paused for about " + delayText + " The retry button will unlock when the cooldown ends.";
+      if (code === "INSTAGRAM_RATE_LIMITED") {
+        message = "Direct Instagram extraction is paused until the cooldown ends. ReelTone tried its configured backup providers first.";
+      } else if (code === "RESOLVER_RATE_LIMITED") {
+        message = "The link resolver is temporarily cooling down. Other configured providers were tried; retry when the countdown ends.";
+      } else if (code === "PROVIDER_RATE_LIMITED") {
+        message = "The external media provider is temporarily cooling down. Retry when the countdown ends.";
+      }
       startRetryCountdown(seconds);
     }
     showError(

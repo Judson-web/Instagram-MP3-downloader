@@ -17,7 +17,10 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 - Convert publicly accessible Reel and video-post URLs into MP3.
 - Choose 128, 192, 256, or 320 kbps.
 - Embed title and creator ID3 tags in downloaded MP3s, plus Reel cover art when Instagram exposes a safe, public thumbnail. Artwork lookup is best-effort on the primary provider too, with a short timeout so it never blocks an otherwise valid download.
+- Cache successful MP3s privately for up to 24 hours, allowing repeats to bypass Instagram extraction while keeping cached objects private.
 - Use yt-dlp's metadata and thumbnail post-processors as part of the independent extractor fallback.
+- Try the independent `gallery-dl` extractor when GraphQL returns no media and has not reported a rate limit; file-size and duration caps remain enforced.
+- During an active Instagram cooldown, reuse private cached output first, then try configured external providers while direct Instagram fetches remain paused.
 - Compact, keyboard-accessible bitrate picker with four presets and concise quality labels.
 - Light and dark themes with a remembered preference.
 - Temporary browser download that expires after ten minutes.
@@ -104,3 +107,5 @@ Successful MP3 outputs under 35 MiB are cached in the connected **private Vercel
 The converter counts visitor requests, then checks the private success cache, and only contacts extractors on a cache miss. When the dedicated Render `yt-dlp + curl-cffi` service is configured, the standalone non-impersonating binary is skipped because it duplicated upstream requests and was the final cause of avoidable 429s. Secondary Cobalt is attempted only on retryable transport/download failures, not HTTP 400. The two HTML/embed fallbacks remain available.
 
 Vercel Cron runs `/api/maintenance/purge-audio-cache` daily and requires `CRON_SECRET`. The route deletes expired private MP3 and metadata objects. The Blob SDK dependency is pinned to `@vercel/blob@2.8.2`.
+
+**Third-party extractor note:** ReelTone invokes `gallery-dl` as a separate command-line process. It is GPL-2.0 licensed; follow its upstream license and source-notice requirements when redistributing an image/container that includes it.
