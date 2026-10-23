@@ -2119,10 +2119,24 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
       }
 
-      // Don't fan out when an upstream explicitly rate-limits us or says the
-      // source is unsupported. Fail over only on a transport/download failure.
-      if (cobaltFallback.reason === "cobalt-rate-limited" ||
-          !shouldRetryCobaltEndpoint(cobaltFallback.reason)) break;
+      // A Cobalt source-fetch rate code can be specific to that instance's
+      // egress. Give one separately hosted secondary instance a single chance,
+      // but never keep rotating providers after the second instance responds.
+      if (
+        cobaltFallback.reason === "instagram-rate-limited" &&
+        endpointIndex === 0 &&
+        cobaltEndpoints.length > 1
+      ) {
+        recordStage("cobalt-primary", "source-limited-trying-independent-instance");
+        continue;
+      }
+
+      // For all other failures, retry only bounded transport/download errors.
+      if (
+        cobaltFallback.reason === "instagram-rate-limited" ||
+        cobaltFallback.reason === "cobalt-rate-limited" ||
+        !shouldRetryCobaltEndpoint(cobaltFallback.reason)
+      ) break;
       }
     }
 
