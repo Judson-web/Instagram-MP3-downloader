@@ -99,8 +99,34 @@ ReelTone is distributed under the [Apache License 2.0](LICENSE).
 
 Deploy a Render Docker web service from this repository using `Dockerfile.extractor` (Docker runtime). Set `REELTONE_EXTRACTOR_TOKEN` to a strong random shared secret. The service validates URLs independently, disables the public API docs, caps source duration and size, and returns MP3 bytes directly. Configure the identical value as `IMPERSONATED_YTDLP_API_TOKEN` in Vercel and set `IMPERSONATED_YTDLP_API_URL` to the service root.
 
-**Optional instagrapi media path:** the extractor includes `instagrapi==3.1.0` and tries its authenticated media API before anonymous extraction only when a session is configured. Set one Render *secret* environment variable: `INSTAGRAPI_SETTINGS_JSON` (serialized settings from an instagrapi `Client.get_settings()` session), `INSTAGRAPI_SETTINGS_B64` (base64-encoded settings JSON), or `INSTAGRAPI_SESSIONID` (a session ID accepted by the private API). The session must belong to an account the operator is authorized to use. Never put session values in browser code, Git, logs, or ChatGPT. Prefer reusable instagrapi settings over a raw session ID; session cookies can expire or be revoked. This path rejects private-account media and gets its own cooldown after a rate limit. If no session is configured, anonymous extractors remain available.
+**Optional instagrapi media path:** the extractor includes `instagrapi==3.1.0` and tries its authenticated media API before anonymous extraction only when a session is configured.
 
+To enable it safely:
+
+1. On a computer you control, create a fresh folder and virtual environment, then install the same client release: `python -m venv .venv` and activate it, followed by `python -m pip install instagrapi==3.1.0`.
+2. Save the following as `make_session.py` and run `python make_session.py`. It prompts for the Instagram password without echoing it and optionally accepts a 2FA code. Only use an account you control and are authorized to use.
+
+   ```python
+   from getpass import getpass
+   from instagrapi import Client
+
+   username = input("Instagram username: ").strip()
+   password = getpass("Instagram password: ")
+   code = input("2FA code (press Enter if not needed): ").strip()
+
+   client = Client()
+   client.login(username, password, verification_code=code)
+   client.dump_settings("instagrapi-session.json")
+   print("Saved instagrapi-session.json. Keep it private.")
+   ```
+
+3. Encode the settings locally, without uploading the file to GitHub or sending it in chat:
+   `python -c "import base64; print(base64.b64encode(open('instagrapi-session.json','rb').read()).decode())"`
+4. Open [the Render extractor environment settings](https://dashboard.render.com/web/srv-dbdelsnb9u1s739ej6cg/environment). Add the secret variable `INSTAGRAPI_SETTINGS_B64` with the Base64 output as its value. Save changes and let Render redeploy. Do not add this value to Vercel, browser code, logs, public issue comments, or Git.
+5. Verify [extractor health](https://reeltone-impersonated-extractor.onrender.com/health). It should show `instagrapiInstalled: true` and `instagrapiSessionConfigured: true`; the health endpoint exposes only booleans, never secrets. Then test one public Reel in ReelTone.
+6. If Instagram presents a challenge, login fails, or the account receives a warning, stop instead of repeatedly retrying. Resolve the challenge through Instagram's official app/site and export settings again only if needed. A session can expire or be revoked.
+
+The session must belong to an account the operator is authorized to use. The converter rejects private-account media, imposes duration and file-size limits, and makes the signed-media CDN download through a separate unauthenticated session so the account's private API cookies are not forwarded to the CDN. If no session is configured, anonymous extractors remain available.
 
 ## Reliability and caching
 
