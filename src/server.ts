@@ -33,7 +33,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const MAX_DURATION_SECONDS = 20 * 60;
 const MAX_REQUESTS_PER_HOUR = 8;
-const PROCESS_TIMEOUT_MS = 16 * 1000;
+const PROCESS_TIMEOUT_MS = 45 * 1000;
 const QUALITY_PRESETS = new Set(["128", "192", "256", "320"]);
 const ALLOWED_HOSTS = new Set([
   "instagram.com",
@@ -1590,12 +1590,12 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     child = youtubeDl.exec(validated.url, {
       noConfig: true,
       noCacheDir: true,
-      noWarnings: false,
+      noWarnings: true,
       noPlaylist: true,
       newline: true,
-      socketTimeout: 8,
-      retries: 0,
-      fragmentRetries: 0,
+      socketTimeout: 15,
+      retries: 1,
+      fragmentRetries: 1,
       userAgent: INSTAGRAM_BROWSER_UA,
       referer: "https://www.instagram.com/",
       matchFilter: "duration <= " + MAX_DURATION_SECONDS,
@@ -1660,12 +1660,12 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         child = youtubeDl.exec(validated.url, {
           noConfig: true,
           noCacheDir: true,
-          noWarnings: false,
+          noWarnings: true,
           noPlaylist: true,
           newline: true,
-          socketTimeout: 8,
-          retries: 0,
-          fragmentRetries: 0,
+          socketTimeout: 15,
+          retries: 1,
+          fragmentRetries: 1,
           userAgent: INSTAGRAM_BROWSER_UA,
           referer: "https://www.instagram.com/",
           matchFilter: "duration <= " + MAX_DURATION_SECONDS,
