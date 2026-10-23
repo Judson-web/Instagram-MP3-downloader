@@ -1397,8 +1397,8 @@ async function tryImpersonatedYtDlpToMp3(
       } catch { /* Use only the HTTP status when a provider error is not JSON. */ }
 
       const code = String(payload?.code || payload?.detail?.code || "").toUpperCase();
-      if (code === "NO_PUBLIC_MEDIA") {
-        return { ok: false, reason: "no-public-media", diagnostic: "impersonated-no-public-media" };
+      if (code === "NO_PUBLIC_MEDIA" || code === "EXTRACTOR_EMPTY") {
+        return { ok: false, reason: "no-public-media", diagnostic: "impersonated-" + code.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 48) };
       }
       if (code === "SOURCE_RATE_LIMITED" || response.status === 429) {
         return {
