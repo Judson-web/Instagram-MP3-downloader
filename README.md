@@ -18,6 +18,8 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 - Choose 128, 192, 256, or 320 kbps.
 - Embed title and creator ID3 tags in downloaded MP3s, plus Reel cover art when Instagram exposes a safe, public thumbnail. Artwork lookup is best-effort on the primary provider too, with a short timeout so it never blocks an otherwise valid download.
 - Use yt-dlp's metadata and thumbnail post-processors as part of the independent extractor fallback.
+- Try the independent `gallery-dl` extractor for public media when GraphQL has no result, with file-size/duration caps and immediate cooldown on source rate limits.
+- During an active Instagram cooldown, skip direct Instagram fetchers but still try explicitly configured external providers before returning the remaining cooldown.
 - Compact, keyboard-accessible bitrate picker with four presets and concise quality labels.
 - Light and dark themes with a remembered preference.
 - Temporary browser download that expires after ten minutes.
