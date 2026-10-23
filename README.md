@@ -16,6 +16,8 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 
 - Convert publicly accessible Reel and video-post URLs into MP3.
 - Choose 128, 192, 256, or 320 kbps.
+- Embed title and creator ID3 tags in downloaded MP3s, plus Reel cover art when Instagram exposes a safe, public thumbnail.
+- Use yt-dlp's metadata and thumbnail post-processors as part of the independent extractor fallback.
 - Compact, keyboard-accessible bitrate picker with four presets and concise quality labels.
 - Light and dark themes with a remembered preference.
 - Temporary browser download that expires after ten minutes.
@@ -27,7 +29,7 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 ## Technology
 
 - **Application:** TypeScript, Node.js, Express
-- **Audio:** FFmpeg, yt-dlp tooling, and an optional dedicated Cobalt extractor fallback
+- **Audio:** FFmpeg, yt-dlp metadata/thumbnail post-processors, and an optional dedicated Cobalt extractor fallback
 - **Database:** Neon Postgres
 - **Deployment:** Vercel
 - **Checks:** TypeScript compiler, Node.js privacy unit tests, and GitHub Actions
