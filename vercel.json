@@ -63,5 +63,11 @@
         }
       ]
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/maintenance/purge-audio-cache",
+      "schedule": "0 3 * * *"
+    }
   ]
 }

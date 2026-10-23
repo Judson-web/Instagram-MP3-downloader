@@ -460,6 +460,198 @@ function getConfiguredMediaResolverUrl(): string | null {
   }
 }
 
+const AUDIO_CACHE_PREFIX = "reeltone-audio-cache";
+const AUDIO_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const AUDIO_CACHE_MAX_BYTES = 35 * 1024 * 1024;
+
+interface AudioCacheMetadata {
+  version: 1;
+  audioPath: string;
+  metadataPath: string;
+  title: string;
+  author: string;
+  quality: QualityPreset;
+  size: number;
+  createdAt: number;
+  expiresAt: number;
+}
+
+interface PrivateBlobResult {
+  statusCode?: number;
+  stream?: globalThis.ReadableStream<Uint8Array> | null;
+  blob?: { size?: number; pathname?: string };
+}
+
+interface PrivateBlobItem {
+  pathname: string;
+  size: number;
+  uploadedAt: Date | string;
+}
+
+interface PrivateBlobSDK {
+  get(pathname: string, options: { access: "private"; abortSignal?: AbortSignal }): Promise<PrivateBlobResult | null>;
+  put(
+    pathname: string,
+    body: globalThis.ReadableStream<Uint8Array> | string,
+    options: { access: "private"; contentType?: string; allowOverwrite?: boolean; cacheControlMaxAge?: number; abortSignal?: AbortSignal }
+  ): Promise<unknown>;
+  del(pathnames: string | string[], options?: { access?: "private" }): Promise<unknown>;
+  list(options?: { prefix?: string; limit?: number; cursor?: string; abortSignal?: AbortSignal }): Promise<{ blobs: PrivateBlobItem[]; cursor?: string; hasMore: boolean }>;
+}
+
+function getPrivateBlobSdk(): PrivateBlobSDK | null {
+  if (!process.env.BLOB_READ_WRITE_TOKEN && !process.env.BLOB_STORE_ID) return null;
+  try {
+    return require("@vercel/blob") as PrivateBlobSDK;
+  } catch {
+    return null;
+  }
+}
+
+function getAudioCachePaths(sourceUrl: string, quality: QualityPreset): { key: string; audioPath: string; metadataPath: string } {
+  const key = crypto.createHash("sha256").update(sourceUrl + "\\n" + quality).digest("hex");
+  return {
+    key,
+    audioPath: AUDIO_CACHE_PREFIX + "/audio/" + key + ".mp3",
+    metadataPath: AUDIO_CACHE_PREFIX + "/meta/" + key + ".json"
+  };
+}
+
+async function privateBlobStreamToText(stream: globalThis.ReadableStream<Uint8Array>, maxBytes = 16384): Promise<string> {
+  const readable = readableFromWeb(stream);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of readable) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > maxBytes) throw new Error("Blob metadata exceeded its size limit");
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function deleteAudioCachePair(sdk: PrivateBlobSDK, audioPath: string, metadataPath: string): Promise<void> {
+  await sdk.del([audioPath, metadataPath], { access: "private" }).catch(() => {});
+}
+
+async function serveCachedAudio(
+  sourceUrl: string,
+  quality: QualityPreset,
+  res: Response
+): Promise<boolean> {
+  const sdk = getPrivateBlobSdk();
+  if (!sdk) return false;
+
+  const paths = getAudioCachePaths(sourceUrl, quality);
+  try {
+    const metaResponse = await sdk.get(paths.metadataPath, {
+      access: "private",
+      abortSignal: AbortSignal.timeout(2500)
+    });
+    if (!metaResponse || metaResponse.statusCode !== 200 || !metaResponse.stream) return false;
+
+    let metadata: AudioCacheMetadata;
+    try {
+      metadata = JSON.parse(await privateBlobStreamToText(metaResponse.stream)) as AudioCacheMetadata;
+    } catch {
+      return false;
+    }
+
+    if (
+      metadata.version !== 1 ||
+      metadata.audioPath !== paths.audioPath ||
+      metadata.metadataPath !== paths.metadataPath ||
+      !Number.isFinite(metadata.expiresAt) ||
+      metadata.expiresAt <= Date.now() ||
+      !Number.isFinite(metadata.size) ||
+      metadata.size < 128 ||
+      metadata.size > AUDIO_CACHE_MAX_BYTES
+    ) {
+      await deleteAudioCachePair(sdk, paths.audioPath, paths.metadataPath);
+      return false;
+    }
+
+    const audioResponse = await sdk.get(paths.audioPath, {
+      access: "private",
+      abortSignal: AbortSignal.timeout(5000)
+    });
+    if (!audioResponse || audioResponse.statusCode !== 200 || !audioResponse.stream) {
+      return false;
+    }
+
+    const filename = timestampedDownloadFilename(metadata.title);
+    res.status(200).set({
+      "Content-Type": "audio/mpeg",
+      "Content-Disposition": 'attachment; filename="' + filename + '"',
+      "X-ReelTone-Filename": filename,
+      "X-ReelTone-Quality": quality,
+      "X-ReelTone-Cache": "HIT",
+      "Cache-Control": "no-store, private",
+      "X-Content-Type-Options": "nosniff",
+      "X-ReelTone-Title": encodeURIComponent(String(metadata.title || "Instagram Reel").slice(0, 180)),
+      "X-ReelTone-Author": encodeURIComponent(String(metadata.author || "Instagram").slice(0, 80)),
+      "Content-Length": String(metadata.size)
+    });
+
+    try {
+      await pipeline(readableFromWeb(audioResponse.stream), res);
+    } catch {
+      if (!res.writableEnded) res.destroy();
+    }
+    return true;
+  } catch {
+    // Cache outages must never block a fresh conversion.
+    return false;
+  }
+}
+
+async function storeCachedAudio(
+  sourceUrl: string,
+  quality: QualityPreset,
+  outputPath: string,
+  title: string,
+  author: string,
+  size: number
+): Promise<void> {
+  if (size < 128 || size > AUDIO_CACHE_MAX_BYTES) return;
+  const sdk = getPrivateBlobSdk();
+  if (!sdk) return;
+
+  const paths = getAudioCachePaths(sourceUrl, quality);
+  const createdAt = Date.now();
+  const metadata: AudioCacheMetadata = {
+    version: 1,
+    audioPath: paths.audioPath,
+    metadataPath: paths.metadataPath,
+    title: String(title || "Instagram Reel").replace(/[\\r\\n\\u0000-\\u001f\\u007f]/g, " ").slice(0, 180),
+    author: String(author || "Instagram").replace(/[\\r\\n\\u0000-\\u001f\\u007f]/g, " ").slice(0, 80),
+    quality,
+    size,
+    createdAt,
+    expiresAt: createdAt + AUDIO_CACHE_TTL_MS
+  };
+
+  try {
+    const body = Readable.toWeb(fs.createReadStream(outputPath)) as unknown as globalThis.ReadableStream<Uint8Array>;
+    await sdk.put(paths.audioPath, body, {
+      access: "private",
+      contentType: "audio/mpeg",
+      allowOverwrite: true,
+      cacheControlMaxAge: 600,
+      abortSignal: AbortSignal.timeout(25000)
+    });
+    await sdk.put(paths.metadataPath, JSON.stringify(metadata), {
+      access: "private",
+      contentType: "application/json",
+      allowOverwrite: true,
+      cacheControlMaxAge: 600,
+      abortSignal: AbortSignal.timeout(5000)
+    });
+  } catch {
+    // The MP3 has already been generated; cache failure must be non-fatal.
+  }
+}
+
 function timestampedDownloadFilename(title?: string): string {
   const normalized = String(title || "reeltone")
     .normalize("NFKD")
@@ -897,10 +1089,11 @@ async function tryPublicHtmlToMp3(sourceUrl: string, directory: string, outputPa
     const canonical = new URL(sourceUrl);
     const canonicalPath = canonical.pathname.replace(/\/+$/, "");
     const shortCode = canonicalPath.match(/^\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)$/i)?.[1];
+    // The two embed endpoints cover the best remaining HTML fallback; avoid a
+    // third identical source-page probe after other extractors have already run.
     const pageCandidates = [
       "https://www.instagram.com" + canonicalPath + "/embed/",
-      ...(shortCode ? ["https://www.instagram.com/p/" + shortCode + "/embed/captioned/"] : []),
-      sourceUrl
+      ...(shortCode ? ["https://www.instagram.com/p/" + shortCode + "/embed/captioned/"] : [])
     ];
 
     let selected: VideoVersion | null = null;
@@ -1204,8 +1397,8 @@ function shouldRetryCobaltEndpoint(reason: string): boolean {
     "cobalt-download-redirect-failed",
     "cobalt-download-not-media"
   ].includes(reason) ||
-    /^cobalt-http-(?:400|408|425|5\d\d)$/.test(reason) ||
-    /^cobalt-download-http-(?:400|403|404|408|425|5\d\d)$/.test(reason);
+    /^cobalt-http-(?:408|425|5\d\d)$/.test(reason) ||
+    /^cobalt-download-http-(?:403|404|408|425|5\d\d)$/.test(reason);
 }
 
 function isAllowedCobaltDownloadUrl(raw: string, endpoint: URL): boolean {
@@ -1693,7 +1886,7 @@ app.get("/api/health", async (_req: Request, res: Response) => {
     const sql = getSql();
     if (!sql) throw new Error("DATABASE_URL is not configured");
     await sql`SELECT 1 AS ok`;
-    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!getConfiguredCobaltEndpoint(), impersonatedYtDlpConfigured: !!getConfiguredImpersonatedExtractorUrl(), easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
+    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!getConfiguredCobaltEndpoint(), impersonatedYtDlpConfigured: !!getConfiguredImpersonatedExtractorUrl(), audioCacheConfigured: !!getPrivateBlobSdk(), easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
   } catch {
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "Service health check failed", error: "The application is live, but its dedicated Neon database is not reachable.", retryable: true, category: "service" });
   }
@@ -1719,13 +1912,12 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     return sendApiError(res, 400, { code: "INVALID_QUALITY", title: "Choose an audio quality", error: "Select 128, 192, 256, or 320 kbps, then start the conversion again.", retryable: false, category: "input" });
   }
 
-  if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
-    return sendApiError(res, 503, { code: "ENGINE_UNAVAILABLE", title: "The audio engine isn't ready", error: "The conversion engine is unavailable in this deployment. Please try again shortly.", retryable: true, category: "service" });
-  }
+  const quality = requestedQuality as QualityPreset;
 
+  // Count requests per visitor first; then let cached audio bypass Instagram's
+  // global cooldown. Re-downloading an already converted Reel should not touch
+  // Instagram again, and the cache stores files privately rather than publishing URLs.
   try {
-    const sourceCooldown = await getSourceCooldownSeconds("instagram");
-    if (sourceCooldown > 0) return sourceCooldownError(res, "instagram", sourceCooldown);
     if (!(await checkRateLimit(clientKey(req)))) {
       return sendApiError(res, 429, { code: "RATE_LIMITED", title: "Hourly conversion limit reached", error: "This site allows eight conversion attempts per hour per visitor. Please wait for the limit to reset before trying again.", retryable: true, category: "rate-limit" });
     }
@@ -1734,7 +1926,19 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "The converter is temporarily unavailable", error: "The rate-limit database could not be reached. No conversion was started; please try again shortly.", retryable: true, category: "service" });
   }
 
-  const quality = requestedQuality as QualityPreset;
+  if (await serveCachedAudio(validated.url, quality, res)) return;
+
+  try {
+    const sourceCooldown = await getSourceCooldownSeconds("instagram");
+    if (sourceCooldown > 0) return sourceCooldownError(res, "instagram", sourceCooldown);
+  } catch (error) {
+    console.error("Source cooldown database is unavailable:", errorName(error) || "unknown error");
+    return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "The converter is temporarily unavailable", error: "The source cooldown could not be checked. No new extraction was started; please try again shortly.", retryable: true, category: "service" });
+  }
+
+  if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
+    return sendApiError(res, 503, { code: "ENGINE_UNAVAILABLE", title: "The audio engine isn't ready", error: "The conversion engine is unavailable in this deployment. Please try again shortly.", retryable: true, category: "service" });
+  }
   const id = crypto.randomUUID();
   const directory = path.join(os.tmpdir(), "reeltone", id);
   try {
@@ -1804,9 +2008,18 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       ...(audioAuthor ? { "X-ReelTone-Author": encodeURIComponent(audioAuthor.replace(/[\r\n\u0000-\u001f]/g, " ").slice(0, 80)) } : {}),
       "Content-Length": String(size)
     });
+    const cacheWrite = storeCachedAudio(
+      validated.url,
+      quality,
+      outputPath,
+      metadataTitle,
+      audioAuthor,
+      size
+    );
     try {
       await pipeline(fs.createReadStream(outputPath), res);
     } finally {
+      await cacheWrite.catch(() => {});
       cleanup();
     }
   };
@@ -2060,153 +2273,162 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     }
     if (resolverEndpoint) console.warn("ReelTone optional resolver fallback failed:", String(publicResolver.reason || "unknown").slice(0, 80));
 
-    // Direct Instagram page/embed parsing has already run before optional providers.
-
-    timeout = setTimeout(() => {
-      timedOut = true;
-      if (child && typeof child.kill === "function") child.kill("SIGKILL");
-    }, PROCESS_TIMEOUT_MS);
-    timeout.unref?.();
-
-    child = youtubeDl.exec(validated.url, {
-      noConfig: true,
-      noCacheDir: true,
-      noWarnings: true,
-      noPlaylist: true,
-      newline: true,
-      socketTimeout: 15,
-      retries: 1,
-      fragmentRetries: 1,
-      userAgent: INSTAGRAM_BROWSER_UA,
-      referer: "https://www.instagram.com/",
-      matchFilter: "duration <= " + MAX_DURATION_SECONDS,
-      extractAudio: true,
-      audioFormat: "mp3",
-      audioQuality: quality + "K",
-      ffmpegLocation: path.dirname(ffmpegPath),
-      output: path.join(directory, "audio.%(ext)s")
-    }, {
-      cwd: directory,
-      env: { ...process.env, HOME: directory, TMPDIR: directory },
-      windowsHide: true
-    });
-
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderrTail = (stderrTail + chunk.toString()).slice(-8000);
-    });
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdoutTail = (stdoutTail + chunk.toString()).slice(-3000);
-    });
-
-    await child;
-    recordStage("yt-dlp", "process-exited");
-    child = null;
-    if (timeout) clearTimeout(timeout);
-    timeout = null;
-
-    if (clientDisconnected || res.destroyed) {
-      cleanup();
-      return;
-    }
-
-    if (fs.existsSync(outputPath) && fs.statSync(outputPath).isFile() && fs.statSync(outputPath).size >= 128) {
-      await streamResult();
-      return;
-    }
-
-    // Some yt-dlp/FFmpeg combinations exit successfully but leave the source
-    // in its original audio/video container instead of naming it audio.mp3.
-    // Recover any real artifact instead of returning a false "no media" failure.
-    const audioExtensions = /\.(?:mp3|m4a|webm|opus|ogg|oga|aac|wav|flac|mp4|mov|mkv|aiff?)$/i;
-    const findAudioArtifacts = () => fs.readdirSync(directory, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && /^(?:audio|source)\./i.test(entry.name) && audioExtensions.test(entry.name))
-      .map((entry) => ({ path: path.join(directory, entry.name), name: entry.name, size: fs.statSync(path.join(directory, entry.name)).size }))
-      .filter((entry) => entry.size >= 128)
-      .sort((left, right) => right.size - left.size);
-
-    let artifactCandidates = findAudioArtifacts();
-
-    if (artifactCandidates.length === 0 && !fallbackController.signal.aborted) {
-      // Second pass: download the original video container instead of asking
-      // yt-dlp to extract audio. FFmpeg then performs the MP3 conversion locally.
-      // This catches cases where metadata lookup exits successfully but the
-      // extractor mode doesn't emit an audio file.
-      try {
-        timeout = setTimeout(() => {
-          timedOut = true;
-          if (child && typeof child.kill === "function") child.kill("SIGKILL");
-        }, PROCESS_TIMEOUT_MS);
-        timeout.unref?.();
-
-        child = youtubeDl.exec(validated.url, {
-          noConfig: true,
-          noCacheDir: true,
-          noWarnings: true,
-          noPlaylist: true,
-          newline: true,
-          socketTimeout: 15,
-          retries: 1,
-          fragmentRetries: 1,
-          userAgent: INSTAGRAM_BROWSER_UA,
-          referer: "https://www.instagram.com/",
-          matchFilter: "duration <= " + MAX_DURATION_SECONDS,
-          format: "best[ext=mp4]/best",
-          output: path.join(directory, "source.%(ext)s")
-        }, {
-          cwd: directory,
-          env: { ...process.env, HOME: directory, TMPDIR: directory },
-          windowsHide: true
-        });
-        child.stderr?.on("data", (chunk: Buffer) => {
-          stderrTail = (stderrTail + chunk.toString()).slice(-8000);
-        });
-        child.stdout?.on("data", (chunk: Buffer) => {
-          stdoutTail = (stdoutTail + chunk.toString()).slice(-3000);
-        });
-        await child;
-        recordStage("yt-dlp-source", "process-exited");
-      } catch (error) {
-        stderrTail = (stderrTail + "\nsource-fetch:" + errorName(error)).slice(-8000);
-        recordStage("yt-dlp-source", timedOut ? "timeout" : errorName(error));
-      } finally {
-        if (timeout) clearTimeout(timeout);
-        timeout = null;
-        child = null;
+    if (getConfiguredImpersonatedExtractorUrl()) {
+      // The independent Python extractor has already tried anonymous GraphQL plus
+      // two bounded curl-cffi yt-dlp profiles. Running the standalone binary again
+      // duplicates requests from the same cloud region and was the final trigger
+      // for the avoidable Instagram 429 observed in production.
+      recordStage("yt-dlp-local", "skipped-independent-impersonation-configured");
+    } else {
+      // Direct Instagram page/embed parsing has already run before optional providers.
+  
+      timeout = setTimeout(() => {
+        timedOut = true;
+        if (child && typeof child.kill === "function") child.kill("SIGKILL");
+      }, PROCESS_TIMEOUT_MS);
+      timeout.unref?.();
+  
+      child = youtubeDl.exec(validated.url, {
+        noConfig: true,
+        noCacheDir: true,
+        noWarnings: true,
+        noPlaylist: true,
+        newline: true,
+        socketTimeout: 15,
+        retries: 1,
+        fragmentRetries: 1,
+        userAgent: INSTAGRAM_BROWSER_UA,
+        referer: "https://www.instagram.com/",
+        matchFilter: "duration <= " + MAX_DURATION_SECONDS,
+        extractAudio: true,
+        audioFormat: "mp3",
+        audioQuality: quality + "K",
+        ffmpegLocation: path.dirname(ffmpegPath),
+        output: path.join(directory, "audio.%(ext)s")
+      }, {
+        cwd: directory,
+        env: { ...process.env, HOME: directory, TMPDIR: directory },
+        windowsHide: true
+      });
+  
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderrTail = (stderrTail + chunk.toString()).slice(-8000);
+      });
+      child.stdout?.on("data", (chunk: Buffer) => {
+        stdoutTail = (stdoutTail + chunk.toString()).slice(-3000);
+      });
+  
+      await child;
+      recordStage("yt-dlp", "process-exited");
+      child = null;
+      if (timeout) clearTimeout(timeout);
+      timeout = null;
+  
+      if (clientDisconnected || res.destroyed) {
+        cleanup();
+        return;
       }
-
-      artifactCandidates = findAudioArtifacts();
-    }
-
-    for (const artifact of artifactCandidates) {
-      try {
-        await encodeDownloadedVideo(
-          artifact.path,
-          outputPath,
-          quality,
-          fallbackController.signal,
-          (process) => { fallbackChild = process; }
-        );
-        if (fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 128) {
-          audioTitle = audioTitle || artifact.name.replace(/\.[^.]+$/, "").slice(0, 180);
-          await streamResult();
-          return;
+  
+      if (fs.existsSync(outputPath) && fs.statSync(outputPath).isFile() && fs.statSync(outputPath).size >= 128) {
+        await streamResult();
+        return;
+      }
+  
+      // Some yt-dlp/FFmpeg combinations exit successfully but leave the source
+      // in its original audio/video container instead of naming it audio.mp3.
+      // Recover any real artifact instead of returning a false "no media" failure.
+      const audioExtensions = /\.(?:mp3|m4a|webm|opus|ogg|oga|aac|wav|flac|mp4|mov|mkv|aiff?)$/i;
+      const findAudioArtifacts = () => fs.readdirSync(directory, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && /^(?:audio|source)\./i.test(entry.name) && audioExtensions.test(entry.name))
+        .map((entry) => ({ path: path.join(directory, entry.name), name: entry.name, size: fs.statSync(path.join(directory, entry.name)).size }))
+        .filter((entry) => entry.size >= 128)
+        .sort((left, right) => right.size - left.size);
+  
+      let artifactCandidates = findAudioArtifacts();
+  
+      if (artifactCandidates.length === 0 && !fallbackController.signal.aborted) {
+        // Second pass: download the original video container instead of asking
+        // yt-dlp to extract audio. FFmpeg then performs the MP3 conversion locally.
+        // This catches cases where metadata lookup exits successfully but the
+        // extractor mode doesn't emit an audio file.
+        try {
+          timeout = setTimeout(() => {
+            timedOut = true;
+            if (child && typeof child.kill === "function") child.kill("SIGKILL");
+          }, PROCESS_TIMEOUT_MS);
+          timeout.unref?.();
+  
+          child = youtubeDl.exec(validated.url, {
+            noConfig: true,
+            noCacheDir: true,
+            noWarnings: true,
+            noPlaylist: true,
+            newline: true,
+            socketTimeout: 15,
+            retries: 1,
+            fragmentRetries: 1,
+            userAgent: INSTAGRAM_BROWSER_UA,
+            referer: "https://www.instagram.com/",
+            matchFilter: "duration <= " + MAX_DURATION_SECONDS,
+            format: "best[ext=mp4]/best",
+            output: path.join(directory, "source.%(ext)s")
+          }, {
+            cwd: directory,
+            env: { ...process.env, HOME: directory, TMPDIR: directory },
+            windowsHide: true
+          });
+          child.stderr?.on("data", (chunk: Buffer) => {
+            stderrTail = (stderrTail + chunk.toString()).slice(-8000);
+          });
+          child.stdout?.on("data", (chunk: Buffer) => {
+            stdoutTail = (stdoutTail + chunk.toString()).slice(-3000);
+          });
+          await child;
+          recordStage("yt-dlp-source", "process-exited");
+        } catch (error) {
+          stderrTail = (stderrTail + "\nsource-fetch:" + errorName(error)).slice(-8000);
+          recordStage("yt-dlp-source", timedOut ? "timeout" : errorName(error));
+        } finally {
+          if (timeout) clearTimeout(timeout);
+          timeout = null;
+          child = null;
         }
-      } catch (error) {
-        stderrTail = (stderrTail + "\nartifact-transcode:" + errorName(error)).slice(-8000);
+  
+        artifactCandidates = findAudioArtifacts();
       }
+  
+      for (const artifact of artifactCandidates) {
+        try {
+          await encodeDownloadedVideo(
+            artifact.path,
+            outputPath,
+            quality,
+            fallbackController.signal,
+            (process) => { fallbackChild = process; }
+          );
+          if (fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 128) {
+            audioTitle = audioTitle || artifact.name.replace(/\.[^.]+$/, "").slice(0, 180);
+            await streamResult();
+            return;
+          }
+        } catch (error) {
+          stderrTail = (stderrTail + "\nartifact-transcode:" + errorName(error)).slice(-8000);
+        }
+      }
+  
+      const generatedFiles = fs.readdirSync(directory, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .slice(0, 12)
+        .map((entry) => {
+          const filePath = path.join(directory, entry.name);
+          try { return entry.name.slice(0, 80) + ":" + fs.statSync(filePath).size; }
+          catch { return entry.name.slice(0, 80) + ":unavailable"; }
+        })
+        .join(",");
+      const diagnostic = safeExtractorDiagnostic(stderrTail + "\n" + stdoutTail, null);
+      console.warn("ReelTone extractor produced no MP3; generated files [" + generatedFiles + "]:", diagnostic);
+  
     }
-
-    const generatedFiles = fs.readdirSync(directory, { withFileTypes: true })
-      .filter((entry) => entry.isFile())
-      .slice(0, 12)
-      .map((entry) => {
-        const filePath = path.join(directory, entry.name);
-        try { return entry.name.slice(0, 80) + ":" + fs.statSync(filePath).size; }
-        catch { return entry.name.slice(0, 80) + ":unavailable"; }
-      })
-      .join(",");
-    const diagnostic = safeExtractorDiagnostic(stderrTail + "\n" + stdoutTail, null);
-    console.warn("ReelTone extractor produced no MP3; generated files [" + generatedFiles + "]:", diagnostic);
   } catch (error) {
     extractorError = error;
     if (timeout) clearTimeout(timeout);
@@ -2268,6 +2490,89 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   }
   const failure = classifyConversionFailure(failureEvidence, timedOut);
   return sendApiError(res, failure.status, failure.payload);
+});
+
+app.get("/api/maintenance/purge-audio-cache", async (req: Request, res: Response) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret || req.headers.authorization !== "Bearer " + secret) {
+    return res.status(401).json({ error: "Unauthorized." });
+  }
+  const sdk = getPrivateBlobSdk();
+  if (!sdk) return res.status(503).json({ error: "Private audio cache is not configured." });
+
+  // Authenticated diagnostic for validating the store credentials and private
+  // read/write path without calling Instagram or exposing cached media.
+  if (req.query.selfTest === "1") {
+    const testPath = AUDIO_CACHE_PREFIX + "/health/" + crypto.randomUUID() + ".txt";
+    try {
+      await sdk.put(testPath, "reeltone-cache-ok", {
+        access: "private",
+        contentType: "text/plain",
+        allowOverwrite: false,
+        cacheControlMaxAge: 60,
+        abortSignal: AbortSignal.timeout(5000)
+      });
+      const test = await sdk.get(testPath, {
+        access: "private",
+        abortSignal: AbortSignal.timeout(5000)
+      });
+      const body = test?.statusCode === 200 && test.stream
+        ? await privateBlobStreamToText(test.stream, 64)
+        : "";
+      await sdk.del(testPath, { access: "private" }).catch(() => {});
+      if (body !== "reeltone-cache-ok") {
+        return res.status(503).json({ ok: false, blobReadWrite: false });
+      }
+      return res.json({ ok: true, blobReadWrite: true, privateAccess: true, testObjectDeleted: true });
+    } catch {
+      await sdk.del(testPath, { access: "private" }).catch(() => {});
+      return res.status(503).json({ ok: false, blobReadWrite: false });
+    }
+  }
+
+  let scanned = 0;
+  let deleted = 0;
+  let cursor: string | undefined;
+  let pages = 0;
+  try {
+    do {
+      const page = await sdk.list({
+        prefix: AUDIO_CACHE_PREFIX + "/meta/",
+        limit: 1000,
+        ...(cursor ? { cursor } : {}),
+        abortSignal: AbortSignal.timeout(15000)
+      });
+      for (const item of page.blobs) {
+        scanned += 1;
+        const inferredKey = item.pathname.slice((AUDIO_CACHE_PREFIX + "/meta/").length).replace(/\\.json$/i, "");
+        const audioPath = AUDIO_CACHE_PREFIX + "/audio/" + inferredKey + ".mp3";
+        let expired = Date.now() - new Date(item.uploadedAt).getTime() > AUDIO_CACHE_TTL_MS;
+        try {
+          const metaResponse = await sdk.get(item.pathname, {
+            access: "private",
+            abortSignal: AbortSignal.timeout(2500)
+          });
+          if (metaResponse?.statusCode === 200 && metaResponse.stream) {
+            const metadata = JSON.parse(await privateBlobStreamToText(metaResponse.stream)) as AudioCacheMetadata;
+            expired = !Number.isFinite(metadata.expiresAt) || metadata.expiresAt <= Date.now();
+          }
+        } catch {
+          // A broken sidecar is treated as expired using the Blob upload time.
+        }
+        if (expired) {
+          await deleteAudioCachePair(sdk, audioPath, item.pathname);
+          deleted += 1;
+        }
+      }
+      cursor = page.cursor;
+      pages += 1;
+    } while (true && cursor && pages < 10);
+
+    return res.json({ ok: true, scanned, deleted, complete: !cursor });
+  } catch (error) {
+    console.error("Audio cache cleanup failed:", errorName(error) || "unknown error");
+    return res.status(503).json({ error: "Audio cache cleanup could not finish." });
+  }
 });
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "API endpoint not found." }));

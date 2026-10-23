@@ -95,3 +95,12 @@ ReelTone is distributed under the [Apache License 2.0](LICENSE).
 ## Impersonated extractor service
 
 Deploy a Render Docker web service from this repository using `Dockerfile.extractor` (Docker runtime). Set `REELTONE_EXTRACTOR_TOKEN` to a strong random shared secret. The service validates URLs independently, disables the public API docs, caps source duration and size, and returns MP3 bytes directly. Configure the identical value as `IMPERSONATED_YTDLP_API_TOKEN` in Vercel and set `IMPERSONATED_YTDLP_API_URL` to the service root. No Instagram account cookies are collected or forwarded.
+
+
+## Reliability and caching
+
+Successful MP3 outputs under 35 MiB are cached in the connected **private Vercel Blob store** for 24 hours, keyed by the canonical Reel URL and bitrate. Cache hits are served before checking Instagram's shared cooldown, so users can re-download previously converted audio even while Instagram is limiting new extraction. Cached audio is not exposed through a public Blob URL.
+
+The converter counts visitor requests, then checks the private success cache, and only contacts extractors on a cache miss. When the dedicated Render `yt-dlp + curl-cffi` service is configured, the standalone non-impersonating binary is skipped because it duplicated upstream requests and was the final cause of avoidable 429s. Secondary Cobalt is attempted only on retryable transport/download failures, not HTTP 400. The two HTML/embed fallbacks remain available.
+
+Vercel Cron runs `/api/maintenance/purge-audio-cache` daily and requires `CRON_SECRET`. The route deletes expired private MP3 and metadata objects. The Blob SDK dependency is pinned to `@vercel/blob@2.8.2`.
