@@ -97,3 +97,5 @@ ReelTone is distributed under the [Apache License 2.0](LICENSE).
 ## Impersonated extractor service
 
 Deploy a Render Docker web service from this repository using `Dockerfile.extractor` (Docker runtime). Set `REELTONE_EXTRACTOR_TOKEN` to a strong random shared secret. The service validates URLs independently, disables the public API docs, caps source duration and size, and returns MP3 bytes directly. Configure the identical value as `IMPERSONATED_YTDLP_API_TOKEN` in Vercel and set `IMPERSONATED_YTDLP_API_URL` to the service root. No Instagram account cookies are collected or forwarded.
+
+**Third-party extractor note:** ReelTone invokes `gallery-dl` as a separate command-line process. It is GPL-2.0 licensed; follow its upstream license and source-notice requirements when redistributing an image/container that includes it.
