@@ -143,12 +143,13 @@ function classifyConversionFailure(evidence: string, timedOut = false): { status
   if (/reel-unavailable|not found|does not exist|removed|deleted|no longer available|expired media/.test(message)) {
     return { status: 404, payload: { code: "REEL_UNAVAILABLE", title: "This Reel could not be found", error: "The post may have been removed, the link may be mistyped, or Instagram may have stopped serving the media.", retryable: false, category: "availability" } };
   }
-  if (/no-public-media|no-public-video-metadata|no media in embed payload|resolver-no-media|resolver-no-video|media-not-public|instagram-page-unavailable|extract_failed/.test(message)) {
-    return { status: 422, payload: { code: "NO_PUBLIC_MEDIA", title: "No publicly playable video was found", error: "Instagram did not expose a playable video to the converter. The Reel may be private, login-gated, age/region-restricted, removed, or temporarily unavailable. Instagram's response doesn't let us distinguish those cases reliably.", retryable: false, category: "availability" } };
-  }
   if (/resolver-(?:http|failed)|cobalt-(?:http|error|unavailable|timeout|download|invalid|no-mp3|empty|untrusted)|provider-not-configured|provider-no-media|provider-request-failed|dns|fetch failed|econnreset/.test(message)) {
     return { status: 503, payload: { code: "RESOLVER_UNAVAILABLE", title: "The media resolver is temporarily unavailable", error: "The link lookup service did not respond successfully. Try again in a little while.", retryable: true, category: "service" } };
   }
+  if (/no-public-media|no-public-video-metadata|no media in embed payload|resolver-no-media|resolver-no-video|media-not-public|instagram-page-unavailable|extract_failed/.test(message)) {
+    return { status: 422, payload: { code: "NO_PUBLIC_MEDIA", title: "No publicly playable video was found", error: "Instagram did not expose a playable video to the converter. The Reel may be private, login-gated, age/region-restricted, removed, or temporarily unavailable. Instagram's response doesn't let us distinguish those cases reliably.", retryable: false, category: "availability" } };
+  }
+
   return { status: 502, payload: { code: "CONVERSION_FAILED", title: "We couldn't convert this Reel", error: "The source could not be converted into an MP3. Check that the link is correct and publicly accessible, then try again.", retryable: true, category: "conversion" } };
 }
 
@@ -1295,7 +1296,7 @@ app.get("/api/health", async (_req: Request, res: Response) => {
     const sql = getSql();
     if (!sql) throw new Error("DATABASE_URL is not configured");
     await sql`SELECT 1 AS ok`;
-    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS });
+    return res.json({ ok: true, service: "reeltone", database: "connected", maxDurationSeconds: MAX_DURATION_SECONDS, extractors: { cobaltConfigured: !!cobaltEndpoint, easyDownConfigured: !!process.env.EASYDOWN_API_TOKEN?.trim(), mediaResolverConfigured: !!getConfiguredMediaResolverUrl(), ffmpegAvailable: !!ffmpegPath && fs.existsSync(ffmpegPath) } });
   } catch {
     return sendApiError(res, 503, { code: "DATABASE_UNAVAILABLE", title: "Service health check failed", error: "The application is live, but its dedicated Neon database is not reachable.", retryable: true, category: "service" });
   }
@@ -1392,6 +1393,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     }
   };
 
+  const cobaltEndpoint = getConfiguredCobaltEndpoint();
   let cobaltFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let providerFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
@@ -1409,6 +1411,42 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   };
 
   try {
+    // Try the configured dedicated extractor first. Direct Instagram HTML frequently
+    // returns a login shell to datacenter IPs; do not spend its full timeout budget first.
+    if (cobaltEndpoint) {
+      cobaltFallback = await tryCobaltToMp3(
+        validated.url,
+        directory,
+        outputPath,
+        quality,
+        fallbackController.signal,
+        (process) => { fallbackChild = process; },
+        cobaltEndpoint
+      );
+      recordStage("cobalt", cobaltFallback.reason);
+
+      if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
+        cleanup();
+        return;
+      }
+      if (cobaltFallback.ok && fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 128) {
+        audioTitle = cobaltFallback.title || audioTitle;
+        await streamResult();
+        return;
+      }
+      if (cobaltFallback.reason === "duration-limit") {
+        cleanup();
+        return sendApiError(res, 413, { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" });
+      }
+      if (cobaltFallback.reason === "media-too-large") {
+        cleanup();
+        return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
+      }
+      if (!["cobalt-not-configured", "cobalt-no-media"].includes(cobaltFallback.reason)) {
+        console.warn("ReelTone Cobalt fallback failed:", String(cobaltFallback.reason || "unknown").slice(0, 80));
+      }
+    }
+
     publicFallback = await tryPublicHtmlToMp3(
       validated.url,
       directory,
@@ -1444,44 +1482,6 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       cleanup();
       const failure = classifyConversionFailure(publicFallback.reason + " " + String(publicFallback.diagnostic || ""));
       return sendApiError(res, failure.status, failure.payload);
-    }
-
-    // Use the separately configured, API-key-protected Cobalt extractor as the next
-    // fallback. It is only called after direct Instagram extraction failed, so the
-    // original Reel URL is not shared with it when direct extraction succeeds.
-    const cobaltEndpoint = getConfiguredCobaltEndpoint();
-    if (cobaltEndpoint) {
-      cobaltFallback = await tryCobaltToMp3(
-        validated.url,
-        directory,
-        outputPath,
-        quality,
-        fallbackController.signal,
-        (process) => { fallbackChild = process; },
-        cobaltEndpoint
-      );
-      recordStage("cobalt", cobaltFallback.reason);
-
-      if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
-        cleanup();
-        return;
-      }
-      if (cobaltFallback.ok && fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 128) {
-        audioTitle = cobaltFallback.title || audioTitle;
-        await streamResult();
-        return;
-      }
-      if (cobaltFallback.reason === "duration-limit") {
-        cleanup();
-        return sendApiError(res, 413, { code: "VIDEO_TOO_LONG", title: "This Reel is longer than the limit", error: "ReelTone supports videos up to 20 minutes per conversion.", retryable: false, category: "availability" });
-      }
-      if (cobaltFallback.reason === "media-too-large") {
-        cleanup();
-        return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
-      }
-      if (!["cobalt-not-configured", "cobalt-no-media"].includes(cobaltFallback.reason)) {
-        console.warn("ReelTone Cobalt fallback failed:", String(cobaltFallback.reason || "unknown").slice(0, 80));
-      }
     }
 
     const providerCooldown = await getSourceCooldownSeconds("easydown");
