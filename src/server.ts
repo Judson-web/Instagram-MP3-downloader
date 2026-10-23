@@ -351,8 +351,8 @@ function sourceCooldownError(res: Response, source: SourceCooldownKey, remaining
   const title = isInstagram ? "Instagram is temporarily limiting requests" :
     (isResolver ? "The link lookup service is cooling down" : "The media provider is cooling down");
   const error = isInstagram
-    ? "ReelTone has paused further Instagram requests to respect the source limit. Wait for the cooldown instead of retrying repeatedly."
-    : "ReelTone has paused requests to this lookup provider and will avoid calling it again until its cooldown expires.";
+    ? "Direct Instagram extraction is paused while the source limit clears. ReelTone tries configured external providers first; retry when the countdown ends."
+    : "This external provider is cooling down. ReelTone will avoid calling it again until the countdown ends.";
   return sendApiError(res, 503, {
     code, title, error, retryable: true, category: "rate-limit", retryAfterSeconds: seconds
   });
@@ -1723,9 +1723,9 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     return sendApiError(res, 503, { code: "ENGINE_UNAVAILABLE", title: "The audio engine isn't ready", error: "The conversion engine is unavailable in this deployment. Please try again shortly.", retryable: true, category: "service" });
   }
 
+  let instagramCooldownAtStart = 0;
   try {
-    const sourceCooldown = await getSourceCooldownSeconds("instagram");
-    if (sourceCooldown > 0) return sourceCooldownError(res, "instagram", sourceCooldown);
+    instagramCooldownAtStart = await getSourceCooldownSeconds("instagram");
     if (!(await checkRateLimit(clientKey(req)))) {
       return sendApiError(res, 429, { code: "RATE_LIMITED", title: "Hourly conversion limit reached", error: "This site allows eight conversion attempts per hour per visitor. Please wait for the limit to reset before trying again.", retryable: true, category: "rate-limit" });
     }
@@ -1769,7 +1769,9 @@ app.post("/api/convert", async (req: Request, res: Response) => {
 
   const streamResult = async () => {
     const shortcode = new URL(validated.url).pathname.match(/^\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1];
-    const artwork = await tryGetInstagramArtwork(validated.url, directory, fallbackController.signal);
+    const artwork = instagramCooldownAtStart > 0
+      ? null
+      : await tryGetInstagramArtwork(validated.url, directory, fallbackController.signal);
     if (artwork?.title && (!audioTitle || /^instagram[_\s-]/i.test(audioTitle))) audioTitle = artwork.title;
     if (artwork?.author) audioAuthor = artwork.author;
 
@@ -1880,7 +1882,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     }
 
     const impersonatedEndpoint = getConfiguredImpersonatedExtractorUrl();
-    if (impersonatedEndpoint) {
+    if (instagramCooldownAtStart <= 0 && impersonatedEndpoint) {
       impersonatedFallback = await tryImpersonatedYtDlpToMp3(
         validated.url,
         directory,
@@ -1928,6 +1930,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       }
     }
 
+    if (instagramCooldownAtStart <= 0) {
     publicFallback = await tryPublicHtmlToMp3(
       validated.url,
       directory,
@@ -1963,6 +1966,11 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       cleanup();
       const failure = classifyConversionFailure(publicFallback.reason + " " + String(publicFallback.diagnostic || ""));
       return sendApiError(res, failure.status, failure.payload);
+    }
+
+    } else {
+      publicFallback = { ok: false, reason: "instagram-cooldown-active", retryAfterSeconds: instagramCooldownAtStart };
+      recordStage("instagram-html", "skipped-cooldown");
     }
 
     const providerCooldown = await getSourceCooldownSeconds("easydown");
@@ -2060,6 +2068,9 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     }
     if (resolverEndpoint) console.warn("ReelTone optional resolver fallback failed:", String(publicResolver.reason || "unknown").slice(0, 80));
 
+    if (instagramCooldownAtStart > 0) {
+      recordStage("yt-dlp", "skipped-instagram-cooldown");
+    } else {
     // Direct Instagram page/embed parsing has already run before optional providers.
 
     timeout = setTimeout(() => {
@@ -2207,6 +2218,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       .join(",");
     const diagnostic = safeExtractorDiagnostic(stderrTail + "\n" + stdoutTail, null);
     console.warn("ReelTone extractor produced no MP3; generated files [" + generatedFiles + "]:", diagnostic);
+    }
   } catch (error) {
     extractorError = error;
     if (timeout) clearTimeout(timeout);
@@ -2265,6 +2277,10 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   if (["provider-rate-limited", "provider-cooldown"].includes(providerFallback.reason)) {
     const seconds = (await getSourceCooldownSeconds("easydown")) || providerFallback.retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS;
     return sourceCooldownError(res, "easydown", seconds);
+  }
+  if (instagramCooldownAtStart > 0) {
+    const seconds = (await getSourceCooldownSeconds("instagram")) || instagramCooldownAtStart;
+    return sourceCooldownError(res, "instagram", seconds);
   }
   const failure = classifyConversionFailure(failureEvidence, timedOut);
   return sendApiError(res, failure.status, failure.payload);
