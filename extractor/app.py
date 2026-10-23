@@ -42,6 +42,10 @@ class ConvertRequest(BaseModel):
     quality: Literal["128", "192", "256", "320"] = "192"
 
 
+class ThumbnailRequest(BaseModel):
+    url: str = Field(min_length=12, max_length=2048)
+
+
 def clean_metadata(value: object, maximum: int = 180) -> str:
     raw = str(value or "")
     return re.sub(r"[\r\n\x00-\x1f\x7f]", " ", raw).strip()[:maximum]
@@ -440,6 +444,143 @@ def health():
         "browserImpersonation": True,
         "ffmpegAvailable": shutil.which("ffmpeg") is not None,
     }
+
+
+
+def thumbnail_content_type(image_path: Path) -> str | None:
+    header = image_path.read_bytes()[:32]
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return "image/webp"
+    if len(header) >= 12 and header[4:8] == b"ftyp" and any(kind in header[8:24] for kind in (b"avif", b"avis")):
+        return "image/avif"
+    return None
+
+
+@app.post("/thumbnail")
+def thumbnail(
+    payload: ThumbnailRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Best-effort cover-art lookup for successful primary-provider downloads."""
+    require_service_token(authorization)
+    source_url = canonical_public_instagram_url(payload.url)
+    shortcode_match = re.search(r"/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", urlparse(source_url).path)
+    shortcode = shortcode_match.group(1) if shortcode_match else ""
+    if not shortcode:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_URL"})
+
+    if not ACTIVE_JOBS.acquire(blocking=False):
+        raise HTTPException(status_code=503, headers={"Retry-After": "5"}, detail={"code": "EXTRACTOR_BUSY"})
+
+    directory = Path(tempfile.mkdtemp(prefix="reeltone-cover-"))
+    cleanup = make_cleanup(directory)
+    keep_for_response = False
+    session = None
+
+    try:
+        session = curl_requests.Session(
+            impersonate="chrome",
+            headers={
+                "Referer": "https://www.instagram.com/",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        landing = session.get("https://www.instagram.com/", timeout=8)
+        if landing.status_code == 429:
+            raise HTTPException(status_code=503, headers={"Retry-After": "30"}, detail={"code": "SOURCE_RATE_LIMITED"})
+        landing.raise_for_status()
+        csrf = session.cookies.get("csrftoken")
+        if not csrf:
+            raise HTTPException(status_code=404, detail={"code": "NO_PUBLIC_THUMBNAIL"})
+
+        response = session.post(
+            "https://www.instagram.com/graphql/query",
+            data={
+                "doc_id": GRAPHQL_DOC_ID,
+                "variables": json.dumps({
+                    "shortcode": shortcode,
+                    "__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider": False,
+                }, separators=(",", ":")),
+            },
+            headers={
+                "X-CSRFToken": csrf,
+                "X-IG-App-ID": INSTAGRAM_APP_ID,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            timeout=8,
+        )
+        if response.status_code == 429:
+            raise HTTPException(status_code=503, headers={"Retry-After": "30"}, detail={"code": "SOURCE_RATE_LIMITED"})
+        if not response.ok:
+            raise HTTPException(status_code=404, detail={"code": "NO_PUBLIC_THUMBNAIL"})
+
+        data = response.json()
+        errors = data.get("errors") or []
+        if any(
+            str(error.get("code", "")) == "1675004"
+            or "rate limit" in str(error.get("message", "")).lower()
+            for error in errors
+        ):
+            raise HTTPException(status_code=503, headers={"Retry-After": "30"}, detail={"code": "SOURCE_RATE_LIMITED"})
+
+        web_info = ((data.get("data") or {}).get("xdt_api__v1__media__shortcode__web_info")) or {}
+        items = web_info.get("items") or []
+        if not items:
+            raise HTTPException(status_code=404, detail={"code": "NO_PUBLIC_THUMBNAIL"})
+        item = items[0]
+
+        image_path = download_public_thumbnail(session, item, directory)
+        if not image_path:
+            raise HTTPException(status_code=404, detail={"code": "NO_PUBLIC_THUMBNAIL"})
+        content_type = thumbnail_content_type(image_path)
+        if not content_type or image_path.stat().st_size > MAX_THUMBNAIL_BYTES:
+            image_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=404, detail={"code": "NO_PUBLIC_THUMBNAIL"})
+
+        user = item.get("user") or item.get("owner") or {}
+        caption = item.get("caption")
+        if isinstance(caption, dict):
+            caption = caption.get("text")
+        title = clean_metadata(item.get("title") or caption or ("Instagram Reel " + shortcode), 160)
+        author = clean_metadata(user.get("full_name") or user.get("username") or "", 80)
+        headers = {
+            "Cache-Control": "no-store, private",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Length": str(image_path.stat().st_size),
+            "X-ReelTone-Title": quote(title, safe=""),
+            "X-ReelTone-Author": quote(author, safe=""),
+        }
+        filename = "reeltone-cover" + {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+            "image/avif": ".avif",
+        }[content_type]
+        result = FileResponse(
+            path=image_path,
+            media_type=content_type,
+            filename=filename,
+            headers=headers,
+            background=BackgroundTask(cleanup),
+        )
+        keep_for_response = True
+        return result
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail={"code": "NO_PUBLIC_THUMBNAIL"})
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        if not keep_for_response:
+            cleanup()
 
 
 @app.post("/convert")
