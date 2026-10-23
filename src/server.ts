@@ -427,6 +427,7 @@ function safeConversionError(error: unknown, timedOut: boolean): string {
 
 const INSTAGRAM_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
 const MAX_SOURCE_BYTES = 150 * 1024 * 1024;
+const MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024;
 
 function readableFromWeb(body: globalThis.ReadableStream<Uint8Array> | null): Readable {
   if (!body) throw new Error("Media response body missing");
@@ -687,7 +688,8 @@ async function embedMp3Metadata(
   title: string,
   artist: string,
   signal: AbortSignal,
-  setProcess: ProcessSetter
+  setProcess: ProcessSetter,
+  coverPath?: string | null
 ): Promise<void> {
   if (!ffmpegPath || !fs.existsSync(ffmpegPath) || signal.aborted) return;
   if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 128) return;
@@ -703,15 +705,30 @@ async function embedMp3Metadata(
   // standard ID3 tags for players that don't read ReelTone's HTTP headers.
   const args = [
     "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-    "-i", outputPath,
-    "-map", "0:a:0",
-    "-map", "0:v?",
-    "-c:a", "copy",
-    "-c:v", "copy",
+    "-i", outputPath
+  ];
+  if (coverPath && fs.existsSync(coverPath)) {
+    args.push(
+      "-i", coverPath,
+      "-map", "0:a:0",
+      "-map", "1:v:0",
+      "-c:a", "copy",
+      "-c:v", "mjpeg",
+      "-disposition:v:0", "attached_pic"
+    );
+  } else {
+    args.push(
+      "-map", "0:a:0",
+      "-map", "0:v?",
+      "-c:a", "copy",
+      "-c:v", "copy"
+    );
+  }
+  args.push(
     "-map_metadata", "-1",
     "-metadata", "album=Instagram Reels",
     "-metadata", "comment=Converted with ReelTone"
-  ];
+  );
   if (safeTitle) args.push("-metadata", "title=" + safeTitle);
   if (safeArtist) args.push("-metadata", "artist=" + safeArtist);
   args.push("-id3v2_version", "3", "-f", "mp3", taggedPath);
@@ -1452,6 +1469,92 @@ function getConfiguredImpersonatedExtractorUrl(): URL | null {
   }
 }
 
+interface ReelArtwork {
+  path: string;
+  title?: string;
+  author?: string;
+}
+
+async function tryGetInstagramArtwork(
+  sourceUrl: string,
+  directory: string,
+  parentSignal: AbortSignal
+): Promise<ReelArtwork | null> {
+  const configured = getConfiguredImpersonatedExtractorUrl();
+  const token = process.env.IMPERSONATED_YTDLP_API_TOKEN?.trim();
+  if (!configured || !token || parentSignal.aborted) return null;
+
+  const endpoint = new URL("/thumbnail", configured);
+  const artworkPath = path.join(directory, "reel-cover.img");
+  fs.rmSync(artworkPath, { force: true });
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        "Accept": "image/jpeg, image/png, image/webp, image/avif"
+      },
+      body: JSON.stringify({ url: sourceUrl }),
+      signal: AbortSignal.any([parentSignal, AbortSignal.timeout(4500)])
+    });
+
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      return null;
+    }
+
+    const contentType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
+    if (!["image/jpeg", "image/png", "image/webp", "image/avif"].includes(contentType)) {
+      await response.body?.cancel().catch(() => {});
+      return null;
+    }
+
+    const declaredBytes = Number(response.headers.get("content-length") || 0);
+    if (declaredBytes > MAX_THUMBNAIL_BYTES) {
+      await response.body?.cancel().catch(() => {});
+      return null;
+    }
+
+    let downloadedBytes = 0;
+    const limiter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        downloadedBytes += chunk.length;
+        if (downloadedBytes > MAX_THUMBNAIL_BYTES) callback(new Error("thumbnail exceeded size limit"));
+        else callback(null, chunk);
+      }
+    });
+
+    await pipeline(
+      readableFromWeb(response.body),
+      limiter,
+      fs.createWriteStream(artworkPath, { flags: "wx" }),
+      { signal: AbortSignal.any([parentSignal, AbortSignal.timeout(4500)]) }
+    );
+
+    if (!fs.existsSync(artworkPath) || fs.statSync(artworkPath).size < 128) {
+      fs.rmSync(artworkPath, { force: true });
+      return null;
+    }
+
+    const decodeHeader = (value: string | null): string | undefined => {
+      if (!value) return undefined;
+      try { return decodeURIComponent(value).replace(/[\r\n\u0000-\u001f]/g, " ").slice(0, 180); }
+      catch { return value.replace(/[\r\n\u0000-\u001f]/g, " ").slice(0, 180); }
+    };
+
+    return {
+      path: artworkPath,
+      title: decodeHeader(response.headers.get("x-reeltone-title")),
+      author: decodeHeader(response.headers.get("x-reeltone-author"))
+    };
+  } catch {
+    fs.rmSync(artworkPath, { force: true });
+    return null;
+  }
+}
+
 async function tryImpersonatedYtDlpToMp3(
   sourceUrl: string,
   directory: string,
@@ -1666,6 +1769,10 @@ app.post("/api/convert", async (req: Request, res: Response) => {
 
   const streamResult = async () => {
     const shortcode = new URL(validated.url).pathname.match(/^\/(?:reel|reels|p|tv)\/([A-Za-z0-9_-]+)/i)?.[1];
+    const artwork = await tryGetInstagramArtwork(validated.url, directory, fallbackController.signal);
+    if (artwork?.title && (!audioTitle || /^instagram[_\s-]/i.test(audioTitle))) audioTitle = artwork.title;
+    if (artwork?.author) audioAuthor = artwork.author;
+
     const metadataTitle = audioTitle || (shortcode ? "Instagram Reel " + shortcode : "Instagram Reel");
     audioTitle = metadataTitle;
     if (!audioAuthor) audioAuthor = "Instagram";
@@ -1673,9 +1780,10 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       outputPath,
       directory,
       metadataTitle,
-      audioAuthor || "Instagram",
+      audioAuthor,
       fallbackController.signal,
-      (process) => { fallbackChild = process; }
+      (process) => { fallbackChild = process; },
+      artwork?.path
     );
     if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
       cleanup();
