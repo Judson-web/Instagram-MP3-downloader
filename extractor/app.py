@@ -137,50 +137,65 @@ def convert(
     keep_for_response = False
 
     try:
-        output_template = str(directory / "audio.%(ext)s")
-        options = {
-            "format": "best[acodec!=none]/best",
-            "outtmpl": output_template,
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "ignoreerrors": False,
-            "socket_timeout": 20,
-            "retries": 1,
-            "fragment_retries": 1,
-            "max_filesize": MAX_FILE_BYTES,
-            "match_filter": f"duration <= {MAX_DURATION_SECONDS}",
-            "extractaudio": True,
-            "audioformat": "mp3",
-            "audioquality": f"{payload.quality}K",
-            "ffmpeg_location": shutil.which("ffmpeg") or "/usr/bin/ffmpeg",
-            # Instagram may reject a generic server TLS fingerprint even when a
-            # Reel is public. Use yt-dlp's supported curl-cffi impersonation path.
-            # No login cookies, account session, or supplied headers are accepted.
-            "impersonate": "chrome",
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/129.0.0.0 Safari/537.36"
-                ),
-                "Referer": "https://www.instagram.com/",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-            "overwrites": True,
-        }
+        info = None
+        last_download_error: Exception | None = None
+        final_failure: tuple[int, str, str] | None = None
 
-        try:
-            with yt_dlp.YoutubeDL(options) as downloader:
-                info = downloader.extract_info(source_url, download=True)
-        except DownloadError as error:
-            status, code, message = safe_download_error(error)
+        # The impersonated TLS/browser profile must own its matching User-Agent.
+        # Manually overriding it with an older Chrome version can undo the benefit
+        # of curl-cffi impersonation. Try one alternate profile on generic/empty
+        # media failures, but stop immediately for login walls, removed posts,
+        # duration limits, or explicit upstream rate limits.
+        for profile in ("chrome", "safari"):
+            output_template = str(directory / (profile + "-audio.%(ext)s"))
+            options = {
+                "format": "best[acodec!=none]/best",
+                "outtmpl": output_template,
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "ignoreerrors": False,
+                "socket_timeout": 20,
+                "retries": 2,
+                "fragment_retries": 2,
+                "max_filesize": MAX_FILE_BYTES,
+                "match_filter": f"duration <= {MAX_DURATION_SECONDS}",
+                "extractaudio": True,
+                "audioformat": "mp3",
+                "audioquality": f"{payload.quality}K",
+                "ffmpeg_location": shutil.which("ffmpeg") or "/usr/bin/ffmpeg",
+                "impersonate": profile,
+                "http_headers": {
+                    "Referer": "https://www.instagram.com/",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                "overwrites": True,
+            }
+
+            try:
+                with yt_dlp.YoutubeDL(options) as downloader:
+                    info = downloader.extract_info(source_url, download=True)
+                last_download_error = None
+                final_failure = None
+                break
+            except DownloadError as error:
+                last_download_error = error
+                final_failure = safe_download_error(error)
+                status, code, message = final_failure
+                if code in {"SOURCE_RATE_LIMITED", "LOGIN_REQUIRED", "REEL_UNAVAILABLE", "VIDEO_TOO_LONG"}:
+                    break
+                # Retry only once, with a distinct supported browser fingerprint.
+                continue
+            except Exception as error:
+                last_download_error = error
+                final_failure = (503, "EXTRACTOR_UNAVAILABLE", "The extractor could not finish the request.")
+                if profile == "chrome":
+                    continue
+                break
+
+        if final_failure is not None:
+            status, code, message = final_failure
             raise HTTPException(status_code=status, detail={"code": code, "error": message})
-        except Exception:
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "EXTRACTOR_UNAVAILABLE", "error": "The extractor could not finish the request."},
-            )
 
         audio_candidates = [
             item for item in directory.iterdir()
