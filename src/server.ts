@@ -1765,7 +1765,8 @@ async function tryCobaltToMp3(
             audioFormat: "mp3",
             audioBitrate: cobaltBitrate,
             filenameStyle: "basic",
-            alwaysProxy: true,
+            // Prefer direct signed URLs where Cobalt supports them; tunnel only when needed.
+            alwaysProxy: false,
             localProcessing: "disabled"
           }),
           // A dedicated API may be waking from idle. Allow it time to start,
