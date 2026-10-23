@@ -40,6 +40,7 @@ app = FastAPI(
 class ConvertRequest(BaseModel):
     url: str = Field(min_length=12, max_length=2048)
     quality: Literal["128", "192", "256", "320"] = "192"
+    strategy: Literal["auto", "gallery-dl-only"] = "auto"
 
 
 class ThumbnailRequest(BaseModel):
@@ -633,7 +634,7 @@ def try_gallery_dl_public_media(
         raise HTTPException(
             status_code=503,
             headers={"Retry-After": "30"},
-            detail={"code": "SOURCE_RATE_LIMITED", "error": "Instagram temporarily limited anonymous extraction."},
+            detail={"code": "GALLERY_DL_RATE_LIMITED", "error": "The independent Instagram gallery extractor was rate-limited."},
         )
 
     supported = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".m4a", ".mp3", ".ogg", ".opus", ".aac"}
@@ -735,22 +736,52 @@ def convert(
         info = None
         final_failure: tuple[int, str, str] | None = None
 
-        # First try Instagram's anonymous public GraphQL media query. It may
-        # return CDN video URLs even when a logged-out page redirects to login.
-        # If the query is stale or errors, continue to yt-dlp's own extractor.
-        if shortcode:
-            info = try_graphql_public_media(source_url, shortcode, directory, payload.quality)
-
-        # gallery-dl is a distinct extractor family and occasionally succeeds on
-        # public posts whose GraphQL metadata query is stale or empty. It is
-        # attempted only when GraphQL did not report a source rate limit.
-        if info is None and shortcode:
-            info = try_gallery_dl_public_media(source_url, shortcode, directory, payload.quality)
+        if payload.strategy == "gallery-dl-only":
+            # Cobalt (or a previous direct extraction) reported an Instagram
+            # source cooldown. Try exactly one independent extractor family on
+            # the separately hosted service; do not run GraphQL or both yt-dlp
+            # impersonation profiles again in this request.
+            if shortcode:
+                info = try_gallery_dl_public_media(
+                    source_url, shortcode, directory, payload.quality
+                )
+            if info is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "NO_PUBLIC_MEDIA",
+                        "error": "The independent public-media extractor returned no playable file.",
+                    },
+                )
+        else:
+            # Default strategy: GraphQL first, then gallery-dl as an independent
+            # parser for public posts whose metadata query is empty or stale.
+            if shortcode:
+                try:
+                    info = try_graphql_public_media(
+                        source_url, shortcode, directory, payload.quality
+                    )
+                except HTTPException as graph_error:
+                    detail = graph_error.detail if isinstance(graph_error.detail, dict) else {}
+                    if detail.get("code") != "SOURCE_RATE_LIMITED":
+                        raise
+                    # Give the current independent extractor one bounded chance:
+                    # gallery-dl's Instagram implementation uses a different
+                    # request path from the anonymous GraphQL helper.
+                    info = try_gallery_dl_public_media(
+                        source_url, shortcode, directory, payload.quality
+                    )
+                    if info is None:
+                        raise graph_error
+            if info is None and shortcode:
+                info = try_gallery_dl_public_media(
+                    source_url, shortcode, directory, payload.quality
+                )
 
         # GraphQL or gallery-dl success writes an MP3 into the request workspace.
         # Otherwise, use two separate
         # impersonated fingerprints with bounded retries and no cookies.
-        if info is None:
+        if info is None and payload.strategy != "gallery-dl-only":
             final_failure = None
             for profile in ("chrome", "safari"):
                 output_template = str(directory / (profile + "-audio.%(ext)s"))

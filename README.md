@@ -19,7 +19,7 @@ A focused web app for converting publicly accessible Instagram Reels and video p
 - Embed title and creator ID3 tags in downloaded MP3s, plus Reel cover art when Instagram exposes a safe, public thumbnail. Artwork lookup is best-effort on the primary provider too, with a short timeout so it never blocks an otherwise valid download.
 - Cache successful MP3s privately for up to 24 hours, allowing repeats to bypass Instagram extraction while keeping cached objects private.
 - Use yt-dlp's metadata and thumbnail post-processors as part of the independent extractor fallback.
-- Try the independent `gallery-dl` extractor when GraphQL returns no media and has not reported a rate limit; file-size and duration caps remain enforced.
+- Use the latest stable `gallery-dl` extractor as an independent public-media fallback. When Cobalt reports Instagram's `error.api.fetch.rate` or a shared Instagram cooldown is active, make one gallery-dl-only attempt on the separate extractor service rather than replaying GraphQL, HTML, and both yt-dlp profiles.
 - During an active Instagram cooldown, reuse private cached output first, then try configured external providers while direct Instagram fetches remain paused.
 - Compact, keyboard-accessible bitrate picker with four presets and concise quality labels.
 - Light and dark themes with a remembered preference.

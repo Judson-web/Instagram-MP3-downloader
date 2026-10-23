@@ -278,7 +278,7 @@ function makeIpHash(ip: string): string {
 
 const DEFAULT_SOURCE_COOLDOWN_SECONDS = 300;
 const MAX_SOURCE_COOLDOWN_SECONDS = 3600;
-type SourceCooldownKey = "instagram" | "resolver" | "easydown";
+type SourceCooldownKey = "instagram" | "resolver" | "easydown" | "gallery-dl";
 const localSourceCooldowns = new Map<SourceCooldownKey, { until: number; strikeCount: number }>();
 
 function parseRetryAfterSeconds(value: string | null | undefined): number | undefined {
@@ -1513,6 +1513,11 @@ async function tryCobaltToMp3(
       const errorCode = String(payload.error?.code || "unknown").toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 80);
       const codeEvidence = errorCode.replace(/[._-]/g, " ");
       if (/duration|too long|limit/.test(codeEvidence)) return { ok: false, reason: "duration-limit", diagnostic: "cobalt-" + errorCode };
+      // Cobalt's error.api.fetch.rate means the target site limited Cobalt's
+      // media fetch, not that Cobalt's own API key exceeded its quota.
+      if (/fetch rate|instagram.*rate|source.*rate/.test(codeEvidence)) {
+        return { ok: false, reason: "instagram-rate-limited", diagnostic: "cobalt-source-fetch-rate" };
+      }
       if (/rate limit|too many requests/.test(codeEvidence)) return { ok: false, reason: "cobalt-rate-limited", diagnostic: "cobalt-" + errorCode };
       return { ok: false, reason: "cobalt-error", diagnostic: "cobalt-" + errorCode };
     }
@@ -1754,7 +1759,8 @@ async function tryImpersonatedYtDlpToMp3(
   outputPath: string,
   quality: QualityPreset,
   parentSignal: AbortSignal,
-  endpoint: URL
+  endpoint: URL,
+  strategy: "auto" | "gallery-dl-only" = "auto"
 ): Promise<ConversionAttempt> {
   const token = process.env.IMPERSONATED_YTDLP_API_TOKEN?.trim();
   if (!token) return { ok: false, reason: "impersonated-not-configured" };
@@ -1770,7 +1776,7 @@ async function tryImpersonatedYtDlpToMp3(
         "Content-Type": "application/json",
         "Accept": "audio/mpeg, application/json"
       },
-      body: JSON.stringify({ url: sourceUrl, quality }),
+      body: JSON.stringify({ url: sourceUrl, quality, strategy }),
       signal: AbortSignal.any([parentSignal, AbortSignal.timeout(65000)])
     });
 
@@ -1789,6 +1795,14 @@ async function tryImpersonatedYtDlpToMp3(
       const code = String(payload?.code || payload?.detail?.code || "").toUpperCase();
       if (code === "NO_PUBLIC_MEDIA" || code === "EXTRACTOR_EMPTY") {
         return { ok: false, reason: "no-public-media", diagnostic: "impersonated-" + code.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 48) };
+      }
+      if (code === "GALLERY_DL_RATE_LIMITED") {
+        return {
+          ok: false,
+          reason: "impersonated-rate-limited",
+          retryAfterSeconds,
+          diagnostic: "impersonated-gallery-dl-source-rate-limited"
+        };
       }
       if (code === "SOURCE_RATE_LIMITED" || response.status === 429) {
         return {
@@ -2067,7 +2081,11 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   try {
     // Cobalt is the preferred extractor. If its stream URL fails, give configured
     // secondary instances a chance before switching extraction strategies.
-    for (let endpointIndex = 0; endpointIndex < cobaltEndpoints.length; endpointIndex++) {
+    if (instagramDirectBlocked) {
+      cobaltFallback = { ok: false, reason: "instagram-cooldown-active", retryAfterSeconds: instagramCooldownAtStart };
+      recordStage("cobalt", "skipped-instagram-cooldown");
+    } else {
+      for (let endpointIndex = 0; endpointIndex < cobaltEndpoints.length; endpointIndex++) {
       const endpoint = cobaltEndpoints[endpointIndex];
       cobaltFallback = await tryCobaltToMp3(
         validated.url,
@@ -2101,14 +2119,29 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         return sendApiError(res, 413, { code: "VIDEO_TOO_LARGE", title: "This video is too large to process", error: "The source exceeds the converter's 150 MiB limit. Try a shorter or smaller public video.", retryable: false, category: "availability" });
       }
 
-      // Don't fan out when an upstream explicitly rate-limits us or says the
-      // source is unsupported. Fail over only on a transport/download failure.
-      if (cobaltFallback.reason === "cobalt-rate-limited" ||
-          !shouldRetryCobaltEndpoint(cobaltFallback.reason)) break;
+      // A Cobalt source-fetch rate code can be specific to that instance's
+      // egress. Give one separately hosted secondary instance a single chance,
+      // but never keep rotating providers after the second instance responds.
+      if (
+        cobaltFallback.reason === "instagram-rate-limited" &&
+        endpointIndex === 0 &&
+        cobaltEndpoints.length > 1
+      ) {
+        recordStage("cobalt-primary", "source-limited-trying-independent-instance");
+        continue;
+      }
+
+      // For all other failures, retry only bounded transport/download errors.
+      if (
+        cobaltFallback.reason === "instagram-rate-limited" ||
+        cobaltFallback.reason === "cobalt-rate-limited" ||
+        !shouldRetryCobaltEndpoint(cobaltFallback.reason)
+      ) break;
+      }
     }
 
     if (!cobaltFallback.ok &&
-        !["not-attempted", "cobalt-not-configured", "cobalt-no-media"].includes(cobaltFallback.reason)) {
+        !["not-attempted", "cobalt-not-configured", "cobalt-no-media", "instagram-cooldown-active"].includes(cobaltFallback.reason)) {
       const safeDiagnostic = String(cobaltFallback.diagnostic || "")
         .replace(/[^a-z0-9._:-]/gi, "").slice(0, 64);
       console.warn("ReelTone Cobalt fallback failed:", cobaltFallback.reason, safeDiagnostic);
@@ -2118,30 +2151,57 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     // Treat that as a source cooldown, while distinguishing it from a 429 on
     // Cobalt's own API so a provider quota does not globally block Instagram.
     if (
-      cobaltFallback.reason === "cobalt-rate-limited" &&
-      /cobalt-download-http-429/i.test(String(cobaltFallback.diagnostic || ""))
+      cobaltFallback.reason === "instagram-rate-limited" ||
+      (cobaltFallback.reason === "cobalt-rate-limited" &&
+       /cobalt-download-http-429/i.test(String(cobaltFallback.diagnostic || "")))
     ) {
       instagramCooldownAtStart = await registerSourceCooldown("instagram", cobaltFallback.retryAfterSeconds);
       instagramDirectBlocked = true;
     }
 
     const impersonatedEndpoint = getConfiguredImpersonatedExtractorUrl();
-    if (!(await shouldSkipDirectInstagram()) && impersonatedEndpoint) {
+    const directInstagramPaused = await shouldSkipDirectInstagram();
+    let galleryDlProviderCooldown = 0;
+    if (directInstagramPaused && instagramCooldownAtStart > 0) {
+      try {
+        galleryDlProviderCooldown = await getSourceCooldownSeconds("gallery-dl");
+      } catch {
+        galleryDlProviderCooldown = -1;
+      }
+    }
+    const galleryDlOnlyFallback =
+      directInstagramPaused &&
+      instagramCooldownAtStart > 0 &&
+      galleryDlProviderCooldown === 0;
+    if (directInstagramPaused && galleryDlProviderCooldown !== 0) {
+      recordStage("gallery-dl", galleryDlProviderCooldown > 0 ? "skipped-provider-cooldown" : "skipped-cooldown-check-failed");
+    }
+    if (impersonatedEndpoint && (!directInstagramPaused || galleryDlOnlyFallback)) {
       impersonatedFallback = await tryImpersonatedYtDlpToMp3(
         validated.url,
         directory,
         outputPath,
         quality,
         fallbackController.signal,
-        impersonatedEndpoint
+        impersonatedEndpoint,
+        galleryDlOnlyFallback ? "gallery-dl-only" : "auto"
       );
       recordStage("yt-dlp-impersonated", impersonatedFallback.reason);
 
       if (impersonatedFallback.reason === "impersonated-rate-limited") {
         instagramCooldownAtStart = await registerSourceCooldown("instagram", impersonatedFallback.retryAfterSeconds);
         instagramDirectBlocked = true;
-        // Continue to configured external providers below, but shouldSkipDirectInstagram()
-        // will prevent further direct Instagram requests in this same conversion.
+        if (
+          galleryDlOnlyFallback ||
+          /gallery-dl-source-rate-limited/i.test(String(impersonatedFallback.diagnostic || ""))
+        ) {
+          await registerSourceCooldown(
+            "gallery-dl",
+            instagramCooldownAtStart || impersonatedFallback.retryAfterSeconds || 600
+          );
+        }
+        // Continue to configured external providers below; further direct
+        // Instagram calls are blocked for this conversion.
       }
       if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
         cleanup();
