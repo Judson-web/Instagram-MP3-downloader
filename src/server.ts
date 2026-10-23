@@ -2061,6 +2061,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   };
 
   const cobaltEndpoints = getConfiguredCobaltEndpoints();
+  let sawCobaltInstagramRateLimit = false;
   let cobaltFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let providerFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
   let publicFallback: ConversionAttempt = { ok: false, reason: "not-attempted" };
@@ -2100,6 +2101,9 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         endpointIndex === 0 ? "cobalt-primary" : "cobalt-fallback-" + endpointIndex,
         cobaltFallback.reason
       );
+      if (cobaltFallback.reason === "instagram-rate-limited") {
+        sawCobaltInstagramRateLimit = true;
+      }
 
       if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
         cleanup();
@@ -2151,6 +2155,7 @@ app.post("/api/convert", async (req: Request, res: Response) => {
     // Treat that as a source cooldown, while distinguishing it from a 429 on
     // Cobalt's own API so a provider quota does not globally block Instagram.
     if (
+      sawCobaltInstagramRateLimit ||
       cobaltFallback.reason === "instagram-rate-limited" ||
       (cobaltFallback.reason === "cobalt-rate-limited" &&
        /cobalt-download-http-429/i.test(String(cobaltFallback.diagnostic || "")))
