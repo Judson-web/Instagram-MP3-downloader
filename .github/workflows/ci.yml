@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+      - name: Validate Python extractor syntax
+        run: python3 -m py_compile extractor/app.py
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:

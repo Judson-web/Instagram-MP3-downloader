@@ -10,6 +10,7 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, urlparse, urlunparse
@@ -30,6 +31,20 @@ ALLOWED_HOSTS = {"instagram.com", "www.instagram.com", "m.instagram.com"}
 POST_PATH = re.compile(r"^/(?:reel|reels|p|tv)/[A-Za-z0-9_-]+/?$", re.IGNORECASE)
 QUALITY_PRESETS = {"128", "192", "256", "320"}
 ACTIVE_JOBS = threading.BoundedSemaphore(value=2)
+
+# Reuse one authenticated client per worker so rotated cookies/device state are not
+# thrown away after every conversion. Render's filesystem is ephemeral, so the
+# environment remains the safe bootstrap; this file only helps within one instance.
+INSTAGRAPI_SETTINGS_PATH = Path("/tmp/reeltone-instagrapi-settings.json")
+INSTAGRAPI_AUTH_COOLDOWN_SECONDS = 15 * 60
+INSTAGRAPI_RATE_COOLDOWN_SECONDS = 5 * 60
+_INSTAGRAPI_LOCK = threading.RLock()
+_INSTAGRAPI_STATE = {
+    "client": None,
+    "mode": "disabled",
+    "retry_after": 0.0,
+    "reauth_retry_after": 0.0,
+}
 
 app = FastAPI(
     title="ReelTone Impersonated Extractor",
@@ -451,6 +466,14 @@ def health():
         "ffmpegAvailable": shutil.which("ffmpeg") is not None,
         "instagrapiInstalled": importlib.util.find_spec("instagrapi") is not None,
         "instagrapiSessionConfigured": instagrapi_is_configured(),
+        "instagrapiAutoRenewConfigured": (
+            os.environ.get("INSTAGRAPI_AUTO_REAUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+            and bool(os.environ.get("INSTAGRAPI_USERNAME", "").strip())
+            and bool(os.environ.get("INSTAGRAPI_PASSWORD", ""))
+        ),
+        "instagrapiAuthMode": instagrapi_status()[0],
+        "instagrapiClientLoaded": instagrapi_status()[1],
+        "instagrapiCooldownActive": instagrapi_status()[2],
     }
 
 
@@ -593,84 +616,402 @@ def thumbnail(
 
 
 def instagrapi_is_configured() -> bool:
-    return bool(
+    settings_present = bool(
         os.environ.get("INSTAGRAPI_SETTINGS_JSON", "").strip()
         or os.environ.get("INSTAGRAPI_SETTINGS_B64", "").strip()
-        or os.environ.get("INSTAGRAPI_SESSIONID", "").strip()
+        or INSTAGRAPI_SETTINGS_PATH.is_file()
     )
+    sessionid_present = bool(os.environ.get("INSTAGRAPI_SESSIONID", "").strip())
+    auto_renew = os.environ.get("INSTAGRAPI_AUTO_REAUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+    credentials_present = bool(
+        auto_renew
+        and os.environ.get("INSTAGRAPI_USERNAME", "").strip()
+        and os.environ.get("INSTAGRAPI_PASSWORD", "")
+    )
+    return settings_present or sessionid_present or credentials_present
 
 
-def try_instagrapi_public_media(
-    source_url: str,
-    shortcode: str,
-    directory: Path,
-    quality: str,
-) -> dict | None:
-    """Fetch one public video via a configured, operator-owned instagrapi session."""
-    settings_raw = os.environ.get("INSTAGRAPI_SETTINGS_JSON", "").strip()
-    settings_b64 = os.environ.get("INSTAGRAPI_SETTINGS_B64", "").strip()
-    sessionid = os.environ.get("INSTAGRAPI_SESSIONID", "").strip()
-    if not (settings_raw or settings_b64 or sessionid):
-        return None
-
-    source_file = directory / "instagrapi-source.bin"
-    audio_file = directory / "instagrapi-audio.mp3"
-    client = None
-    response = None
-
-    try:
-        from instagrapi import Client
-
-        client = Client()
-        # No generic retry train: one metadata request plus one bounded CDN transfer.
-        client.set_retry_config(
-            request_timeout=18,
-            session_retry_total=0,
-            session_retry_backoff_factor=0,
-            session_retry_statuses=[],
+def instagrapi_status() -> tuple[str, bool, bool]:
+    """Return non-secret readiness details for the health endpoint."""
+    with _INSTAGRAPI_LOCK:
+        return (
+            str(_INSTAGRAPI_STATE["mode"]),
+            _INSTAGRAPI_STATE["client"] is not None,
+            float(_INSTAGRAPI_STATE["retry_after"]) > time.monotonic(),
         )
 
-        if settings_raw or settings_b64:
-            if settings_raw:
-                settings = json.loads(settings_raw)
-            else:
-                settings = json.loads(base64.b64decode(settings_b64, validate=True).decode("utf-8"))
-            if not isinstance(settings, dict) or not settings:
-                return None
-            client.set_settings(settings)
-        else:
-            # Session IDs are secrets. Keep them only in the service environment.
-            client.login_by_sessionid(sessionid)
 
-        media_pk = int(client.media_pk_from_code(shortcode))
-        media = client.media_info_v1(media_pk)
+def _close_instagrapi_client(client: object | None) -> None:
+    if client is None:
+        return
+    for session_name in ("private", "public", "graphql"):
+        session = getattr(client, session_name, None)
+        close = getattr(session, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
-        owner = getattr(media, "user", None)
-        if bool(getattr(owner, "is_private", False)):
-            raise HTTPException(
-                status_code=422,
-                detail={"code": "PRIVATE_REEL", "error": "This converter only processes public Instagram media."},
-            )
-        if int(getattr(media, "media_type", 0) or 0) != 2:
-            return None
 
-        duration_value = getattr(media, "video_duration", None)
+def _instagrapi_error_kind(error: Exception) -> str:
+    """Classify failures without logging exception text or signed URLs."""
+    name = type(error).__name__.lower()
+    message = str(error).lower()
+    if (
+        "throttled" in name
+        or "ratelimit" in name
+        or "rate limit" in message
+        or "too many requests" in message
+        or "http 429" in message
+        or "status code 429" in message
+        or "please wait" in message
+        or "feedback_required" in message
+    ):
+        return "rate-limited"
+    if (
+        "loginrequired" in name
+        or "login_required" in message
+        or "user_has_logged_out" in message
+        or "userhasloggedout" in name
+        or "session expired" in message
+        or "session has expired" in message
+        or "not authenticated" in message
+        or "authentication required" in message
+        or "not logged in" in message
+        or "login required" in message
+    ):
+        return "expired-session"
+    if "challenge" in name or "checkpoint" in message or "challenge_required" in message:
+        return "challenge-required"
+    return "unavailable"
+
+
+def _build_instagrapi_client(require_renewal: bool = False):
+    """Load the best saved authorization and optionally let Instagrapi renew it.
+
+    INSTAGRAPI_USERNAME/PASSWORD are optional Render secrets. When supplied with
+    saved settings, Client.login() validates/reuses them and can relogin if the
+    prior authorization is stale. Raw browser sessionid alone cannot be renewed
+    indefinitely; it is retained as a compatibility bootstrap only.
+    """
+    from instagrapi import Client
+
+    client = Client()
+    client.set_retry_config(
+        request_timeout=18,
+        session_retry_total=0,
+        session_retry_backoff_factor=0,
+        session_retry_statuses=[],
+    )
+
+    settings_raw = os.environ.get("INSTAGRAPI_SETTINGS_JSON", "").strip()
+    settings_b64 = os.environ.get("INSTAGRAPI_SETTINGS_B64", "").strip()
+    username = os.environ.get("INSTAGRAPI_USERNAME", "").strip()
+    password = os.environ.get("INSTAGRAPI_PASSWORD", "")
+    auto_reauth = os.environ.get("INSTAGRAPI_AUTO_REAUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+    has_credentials = bool(auto_reauth and username and password)
+    sessionid = os.environ.get("INSTAGRAPI_SESSIONID", "").strip()
+    mode = "disabled"
+
+    if INSTAGRAPI_SETTINGS_PATH.is_file():
+        # Prefer newer session state saved by this worker over the original deploy
+        # seed. On a fresh Render instance the file is absent and env settings win.
+        client.load_settings(str(INSTAGRAPI_SETTINGS_PATH))
+        mode = "cached-settings"
+    elif settings_raw or settings_b64:
+        settings = (
+            json.loads(settings_raw)
+            if settings_raw
+            else json.loads(base64.b64decode(settings_b64, validate=True).decode("utf-8"))
+        )
+        if not isinstance(settings, dict) or not settings:
+            raise ValueError("invalid Instagrapi settings")
+        client.set_settings(settings)
+        mode = "settings"
+    elif sessionid:
         try:
-            duration = float(duration_value) if duration_value is not None else 0.0
-        except (TypeError, ValueError):
-            duration = 0.0
-        if duration > MAX_DURATION_SECONDS:
-            raise HTTPException(
-                status_code=413,
-                detail={"code": "VIDEO_TOO_LONG", "error": "This Reel exceeds the 20-minute conversion limit."},
-            )
+            client.login_by_sessionid(sessionid)
+            mode = "sessionid"
+        except Exception as session_error:
+            # If the imported browser session has expired, one password login is
+            # allowed only when the operator explicitly enabled auto reauth.
+            if not has_credentials or _instagrapi_error_kind(session_error) in {"rate-limited", "challenge-required"}:
+                raise
+            if not client.login(username, password):
+                raise RuntimeError("Instagrapi credential login was not accepted")
+            mode = "password"
+    elif has_credentials:
+        if not client.login(username, password):
+            raise RuntimeError("Instagrapi credential login was not accepted")
+        mode = "password"
+    else:
+        _close_instagrapi_client(client)
+        return None, "disabled"
 
-        media_url = allowed_instagram_media_url(str(getattr(media, "video_url", "") or ""))
-        if not media_url:
+    if has_credentials and mode in {"settings", "cached-settings", "sessionid"}:
+        # Explicit opt-in only. During initial boot, keep an accepted browser
+        # session if the password login flow is rejected by Instagram; during
+        # recovery, fail closed if the stale saved authorization cannot be renewed.
+        try:
+            if not client.login(username, password):
+                raise RuntimeError("Instagrapi saved-session renewal was not accepted")
+            mode = "settings+password-renewal"
+        except Exception:
+            if require_renewal:
+                raise
+            if mode == "sessionid":
+                mode = "sessionid-renewal-failed"
+            else:
+                mode = "settings-renewal-failed"
+
+    return client, mode
+
+
+def _persist_instagrapi_settings(client: object) -> None:
+    """Persist rotated settings to owner-only ephemeral storage; never print them."""
+    temporary = INSTAGRAPI_SETTINGS_PATH.with_suffix(".tmp")
+    with _INSTAGRAPI_LOCK:
+        try:
+            dump = getattr(client, "dump_settings", None)
+            if not callable(dump):
+                return
+            dump(str(temporary))
+            os.chmod(temporary, 0o600)
+            temporary.replace(INSTAGRAPI_SETTINGS_PATH)
+            os.chmod(INSTAGRAPI_SETTINGS_PATH, 0o600)
+        except Exception:
+            try:
+                temporary.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _get_instagrapi_client():
+    with _INSTAGRAPI_LOCK:
+        if _INSTAGRAPI_STATE["client"] is not None:
+            return _INSTAGRAPI_STATE["client"]
+        if float(_INSTAGRAPI_STATE["retry_after"]) > time.monotonic():
+            return None
+        client = None
+        try:
+            client, mode = _build_instagrapi_client()
+            if client is None:
+                _INSTAGRAPI_STATE.update(client=None, mode="disabled", retry_after=0.0)
+                return None
+            _INSTAGRAPI_STATE.update(client=client, mode=mode, retry_after=0.0)
+            _persist_instagrapi_settings(client)
+            return client
+        except Exception as error:
+            kind = _instagrapi_error_kind(error)
+            cooldown = (
+                INSTAGRAPI_RATE_COOLDOWN_SECONDS
+                if kind == "rate-limited"
+                else INSTAGRAPI_AUTH_COOLDOWN_SECONDS
+                if kind in {"expired-session", "challenge-required"}
+                else 60
+            )
+            _close_instagrapi_client(client)
+            _INSTAGRAPI_STATE.update(
+                client=None,
+                mode=kind,
+                retry_after=time.monotonic() + cooldown,
+            )
+            if kind == "rate-limited":
+                raise HTTPException(
+                    status_code=503,
+                    headers={"Retry-After": str(cooldown)},
+                    detail={
+                        "code": "INSTAGRAPI_RATE_LIMITED",
+                        "error": "Instagram temporarily limited the authenticated media request.",
+                    },
+                )
             return None
 
-        # Fetch the signed CDN URL with an anonymous transport session. Never send
-        # the authenticated private-API session's cookies/headers to the media CDN.
+
+def _invalidate_instagrapi_client(
+    client: object | None,
+    mode: str = "expired-session",
+    cooldown: int = INSTAGRAPI_AUTH_COOLDOWN_SECONDS,
+) -> None:
+    with _INSTAGRAPI_LOCK:
+        active = _INSTAGRAPI_STATE["client"]
+        if client is None or active is client:
+            _close_instagrapi_client(active)
+            _INSTAGRAPI_STATE.update(
+                client=None,
+                mode=mode,
+                retry_after=time.monotonic() + max(1, cooldown),
+            )
+            auto_reauth = os.environ.get("INSTAGRAPI_AUTO_REAUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+            has_credentials = bool(
+                auto_reauth
+                and os.environ.get("INSTAGRAPI_USERNAME", "").strip()
+                and os.environ.get("INSTAGRAPI_PASSWORD", "")
+            )
+            if mode in {"expired-session", "challenge-required"} and not has_credentials:
+                # Never keep trying an old cached settings file after Instagram
+                # rejected it. Fall back to the deployment's configured bootstrap
+                # (environment settings/sessionid) after the cooldown instead.
+                try:
+                    INSTAGRAPI_SETTINGS_PATH.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+
+def _refresh_instagrapi_client(client: object | None):
+    """Try one credential-backed renewal, guarded against concurrent login loops."""
+    auto_reauth = os.environ.get("INSTAGRAPI_AUTO_REAUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+    username = os.environ.get("INSTAGRAPI_USERNAME", "").strip()
+    password = os.environ.get("INSTAGRAPI_PASSWORD", "")
+    if not auto_reauth or not username or not password:
+        _invalidate_instagrapi_client(client, "expired-session")
+        return None
+
+    with _INSTAGRAPI_LOCK:
+        if client is not None and _INSTAGRAPI_STATE["client"] is not client:
+            return _INSTAGRAPI_STATE["client"]
+        if float(_INSTAGRAPI_STATE["reauth_retry_after"]) > time.monotonic():
+            _invalidate_instagrapi_client(client, "reauth-cooldown")
+            return None
+
+        _INSTAGRAPI_STATE["reauth_retry_after"] = (
+            time.monotonic() + INSTAGRAPI_AUTH_COOLDOWN_SECONDS
+        )
+        active = _INSTAGRAPI_STATE["client"]
+        _close_instagrapi_client(active)
+        _INSTAGRAPI_STATE.update(client=None, mode="renewing", retry_after=0.0)
+
+        renewed = None
+        try:
+            renewed, mode = _build_instagrapi_client(require_renewal=True)
+            if renewed is None:
+                raise RuntimeError("Instagrapi renewal is not configured")
+            _INSTAGRAPI_STATE.update(
+                client=renewed,
+                mode=mode,
+                retry_after=0.0,
+                reauth_retry_after=0.0,
+            )
+            _persist_instagrapi_settings(renewed)
+            return renewed
+        except Exception as error:
+            kind = _instagrapi_error_kind(error)
+            _close_instagrapi_client(renewed)
+            cooldown = (
+                INSTAGRAPI_RATE_COOLDOWN_SECONDS
+                if kind == "rate-limited"
+                else INSTAGRAPI_AUTH_COOLDOWN_SECONDS
+            )
+            _INSTAGRAPI_STATE.update(
+                client=None,
+                mode="reauth-" + kind,
+                retry_after=time.monotonic() + cooldown,
+            )
+            if kind == "rate-limited":
+                raise HTTPException(
+                    status_code=503,
+                    headers={"Retry-After": str(cooldown)},
+                    detail={
+                        "code": "INSTAGRAPI_RATE_LIMITED",
+                        "error": "Instagram temporarily limited the authenticated media request.",
+                    },
+                )
+            return None
+
+
+def _media_value(media: object, key: str, default=None):
+    if isinstance(media, dict):
+        return media.get(key, default)
+    return getattr(media, key, default)
+
+
+def _media_mapping(media: object) -> dict:
+    if isinstance(media, dict):
+        return media
+    for method_name in ("model_dump", "dict"):
+        method = getattr(media, method_name, None)
+        if callable(method):
+            try:
+                result = method()
+                if isinstance(result, dict):
+                    return result
+            except Exception:
+                pass
+    result = {}
+    for key in (
+        "image_versions2", "thumbnail_resources", "thumbnail_url", "display_url",
+        "thumbnail_src", "caption_text", "title", "user", "owner",
+    ):
+        value = getattr(media, key, None)
+        if value is not None:
+            if key in {"user", "owner"} and not isinstance(value, dict):
+                value = {
+                    "username": getattr(value, "username", ""),
+                    "full_name": getattr(value, "full_name", ""),
+                    "is_private": getattr(value, "is_private", False),
+                }
+            result[key] = value
+    return result
+
+
+def _media_video_urls(media: object) -> list[str]:
+    """Return at most three host-validated CDN video URL candidates."""
+    found: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+
+    def add(raw_url, width=0, height=0, priority=0):
+        if not isinstance(raw_url, str):
+            return
+        safe_url = allowed_instagram_media_url(raw_url)
+        if not safe_url or safe_url in seen:
+            return
+        seen.add(safe_url)
+        try:
+            score = int(width or 0) * int(height or 0)
+        except (TypeError, ValueError):
+            score = 0
+        found.append((priority, score, safe_url))
+
+    add(_media_value(media, "video_url"), priority=2)
+    versions = _media_value(media, "video_versions") or []
+    if isinstance(versions, dict):
+        versions = versions.get("candidates") or versions.get("versions") or []
+    if isinstance(versions, (list, tuple)):
+        for version in versions:
+            add(
+                _media_value(version, "url") or _media_value(version, "video_url"),
+                _media_value(version, "width", 0),
+                _media_value(version, "height", 0),
+                priority=1,
+            )
+    resources = _media_value(media, "resources") or []
+    if isinstance(resources, (list, tuple)):
+        for resource in resources:
+            resource_type = str(
+                _media_value(resource, "media_type", _media_value(resource, "type", "")) or ""
+            ).lower()
+            video_url = _media_value(resource, "video_url")
+            if not video_url and resource_type in {"2", "video"}:
+                video_url = _media_value(resource, "url")
+            if video_url:
+                add(
+                    video_url,
+                    _media_value(resource, "width", 0),
+                    _media_value(resource, "height", 0),
+                    priority=0,
+                )
+    found.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in found[:3]]
+
+
+def _download_instagrapi_cdn_video(media_url: str, source_file: Path) -> str:
+    """Download via a separate anonymous transport; never forward private API cookies."""
+    response = None
+    try:
+        media_url = allowed_instagram_media_url(media_url)
+        if not media_url:
+            return "unavailable"
         response = curl_requests.get(
             media_url,
             impersonate="chrome",
@@ -680,18 +1021,21 @@ def try_instagrapi_public_media(
         if response.status_code == 429:
             raise HTTPException(
                 status_code=503,
-                headers={"Retry-After": "300"},
-                detail={"code": "INSTAGRAPI_RATE_LIMITED", "error": "Instagram temporarily limited the authenticated media request."},
+                headers={"Retry-After": str(INSTAGRAPI_RATE_COOLDOWN_SECONDS)},
+                detail={
+                    "code": "INSTAGRAPI_RATE_LIMITED",
+                    "error": "Instagram temporarily limited the authenticated media request.",
+                },
             )
         if response.status_code in (401, 403):
-            return None
+            source_file.unlink(missing_ok=True)
+            return "stale-cdn-url"
         final_url = allowed_instagram_media_url(str(getattr(response, "url", media_url)))
         if not response.ok or not final_url:
-            return None
-
+            return "unavailable"
         content_type = str(response.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
         if content_type.startswith("text/") or "application/json" in content_type:
-            return None
+            return "unavailable"
         try:
             declared_size = int(response.headers.get("content-length", "0"))
         except (TypeError, ValueError):
@@ -708,10 +1052,214 @@ def try_instagrapi_public_media(
                 if received > MAX_FILE_BYTES:
                     raise HTTPException(status_code=413, detail={"code": "VIDEO_TOO_LARGE"})
                 output.write(chunk)
-        response.close()
-        response = None
         if received < 128:
             source_file.unlink(missing_ok=True)
+            return "unavailable"
+        return "ok"
+    except HTTPException:
+        source_file.unlink(missing_ok=True)
+        raise
+    except Exception:
+        source_file.unlink(missing_ok=True)
+        return "unavailable"
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+
+def _read_media_details(client: object, shortcode: str):
+    """Serialize authenticated API access when using a shared worker client."""
+    with _INSTAGRAPI_LOCK:
+        media_pk = int(client.media_pk_from_code(shortcode))
+        media = client.media_info(media_pk)
+        if media is None:
+            media = client.media_info_v1(media_pk)
+        return media_pk, media
+
+
+def try_instagrapi_public_media(
+    source_url: str,
+    shortcode: str,
+    directory: Path,
+    quality: str,
+) -> dict | None:
+    """Fetch public video with a reused session and bounded signed-URL refresh."""
+    if not instagrapi_is_configured() or not shortcode:
+        return None
+
+    client = None
+    try:
+        client = _get_instagrapi_client()
+        if client is None:
+            return None
+
+        try:
+            media_pk, media = _read_media_details(client, shortcode)
+        except Exception as first_error:
+            kind = _instagrapi_error_kind(first_error)
+            if kind == "rate-limited":
+                _invalidate_instagrapi_client(
+                    client, "rate-limited", INSTAGRAPI_RATE_COOLDOWN_SECONDS
+                )
+                raise HTTPException(
+                    status_code=503,
+                    headers={"Retry-After": str(INSTAGRAPI_RATE_COOLDOWN_SECONDS)},
+                    detail={
+                        "code": "INSTAGRAPI_RATE_LIMITED",
+                        "error": "Instagram temporarily limited the authenticated media request.",
+                    },
+                )
+            if kind == "expired-session":
+                client = _refresh_instagrapi_client(client)
+                if client is None:
+                    return None
+                try:
+                    media_pk, media = _read_media_details(client, shortcode)
+                except Exception as retry_error:
+                    retry_kind = _instagrapi_error_kind(retry_error)
+                    if retry_kind == "rate-limited":
+                        _invalidate_instagrapi_client(
+                            client, "rate-limited", INSTAGRAPI_RATE_COOLDOWN_SECONDS
+                        )
+                        raise HTTPException(
+                            status_code=503,
+                            headers={"Retry-After": str(INSTAGRAPI_RATE_COOLDOWN_SECONDS)},
+                            detail={
+                                "code": "INSTAGRAPI_RATE_LIMITED",
+                                "error": "Instagram temporarily limited the authenticated media request.",
+                            },
+                        )
+                    if retry_kind in {"expired-session", "challenge-required"}:
+                        _invalidate_instagrapi_client(client, retry_kind)
+                    return None
+            elif kind == "challenge-required":
+                _invalidate_instagrapi_client(client, "challenge-required")
+                return None
+            else:
+                return None
+
+        owner = _media_value(media, "user") or _media_value(media, "owner")
+        if bool(_media_value(owner, "is_private", False)):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "PRIVATE_REEL",
+                    "error": "This converter only processes public Instagram media.",
+                },
+            )
+
+        video_urls = _media_video_urls(media)
+        media_type = str(_media_value(media, "media_type", "") or "")
+        if media_type not in {"2", "video"} and not video_urls:
+            return None
+        if not video_urls:
+            try:
+                with _INSTAGRAPI_LOCK:
+                    media = client.media_info_v1(media_pk)
+                video_urls = _media_video_urls(media)
+            except HTTPException:
+                raise
+            except Exception as metadata_error:
+                metadata_kind = _instagrapi_error_kind(metadata_error)
+                if metadata_kind == "rate-limited":
+                    _invalidate_instagrapi_client(
+                        client, "rate-limited", INSTAGRAPI_RATE_COOLDOWN_SECONDS
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        headers={"Retry-After": str(INSTAGRAPI_RATE_COOLDOWN_SECONDS)},
+                        detail={
+                            "code": "INSTAGRAPI_RATE_LIMITED",
+                            "error": "Instagram temporarily limited the authenticated media request.",
+                        },
+                    )
+                if metadata_kind == "expired-session":
+                    client = _refresh_instagrapi_client(client)
+                    if client is None:
+                        return None
+                    try:
+                        with _INSTAGRAPI_LOCK:
+                            media = client.media_info_v1(media_pk)
+                        video_urls = _media_video_urls(media)
+                    except Exception:
+                        return None
+                else:
+                    return None
+        if not video_urls:
+            return None
+
+        duration_value = _media_value(media, "video_duration")
+        try:
+            duration = float(duration_value) if duration_value is not None else 0.0
+        except (TypeError, ValueError):
+            duration = 0.0
+        if duration > MAX_DURATION_SECONDS:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "VIDEO_TOO_LONG",
+                    "error": "This Reel exceeds the 20-minute conversion limit.",
+                },
+            )
+
+        source_file = directory / "instagrapi-source.bin"
+        audio_file = directory / "instagrapi-audio.mp3"
+        old_urls: set[str] = set()
+        saw_stale_cdn_url = False
+        download_status = "unavailable"
+        for candidate in video_urls[:2]:
+            old_urls.add(candidate)
+            download_status = _download_instagrapi_cdn_video(candidate, source_file)
+            saw_stale_cdn_url = saw_stale_cdn_url or download_status == "stale-cdn-url"
+            if download_status == "ok":
+                break
+
+        if download_status != "ok" and saw_stale_cdn_url:
+            # A signed CDN URL may expire independently of the account session.
+            # Refresh API metadata exactly once and try only one newly signed URL.
+            try:
+                with _INSTAGRAPI_LOCK:
+                    fresh_media = client.media_info_v1(media_pk)
+            except HTTPException:
+                raise
+            except Exception as refresh_error:
+                refresh_kind = _instagrapi_error_kind(refresh_error)
+                if refresh_kind == "rate-limited":
+                    _invalidate_instagrapi_client(
+                        client, "rate-limited", INSTAGRAPI_RATE_COOLDOWN_SECONDS
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        headers={"Retry-After": str(INSTAGRAPI_RATE_COOLDOWN_SECONDS)},
+                        detail={
+                            "code": "INSTAGRAPI_RATE_LIMITED",
+                            "error": "Instagram temporarily limited the authenticated media request.",
+                        },
+                    )
+                if refresh_kind == "expired-session":
+                    client = _refresh_instagrapi_client(client)
+                    if client is None:
+                        return None
+                    try:
+                        with _INSTAGRAPI_LOCK:
+                            fresh_media = client.media_info_v1(media_pk)
+                    except Exception:
+                        return None
+                else:
+                    return None
+
+            fresh_urls = _media_video_urls(fresh_media)
+            fresh_url = next((url for url in fresh_urls if url not in old_urls), None)
+            if fresh_url:
+                refreshed_status = _download_instagrapi_cdn_video(fresh_url, source_file)
+                if refreshed_status == "ok":
+                    media = fresh_media
+                    download_status = "ok"
+
+        if download_status != "ok":
             return None
 
         ffprobe = shutil.which("ffprobe")
@@ -719,9 +1267,14 @@ def try_instagrapi_public_media(
         if not ffprobe:
             return None
         probe = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(source_file)],
-            capture_output=True, text=True, timeout=8, check=False,
+            [
+                ffprobe, "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(source_file),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
         )
         try:
             probed_duration = float((probe.stdout or "").strip())
@@ -732,68 +1285,137 @@ def try_instagrapi_public_media(
         if probed_duration > MAX_DURATION_SECONDS:
             raise HTTPException(
                 status_code=413,
-                detail={"code": "VIDEO_TOO_LONG", "error": "This Reel exceeds the 20-minute conversion limit."},
+                detail={
+                    "code": "VIDEO_TOO_LONG",
+                    "error": "This Reel exceeds the 20-minute conversion limit.",
+                },
             )
 
-        raw_caption = getattr(media, "caption_text", None) or ""
+        raw_caption = _media_value(media, "caption_text") or ""
+        if not raw_caption:
+            caption = _media_value(media, "caption")
+            raw_caption = caption.get("text", "") if isinstance(caption, dict) else caption or ""
         title = clean_metadata(raw_caption or ("Instagram Reel " + shortcode), 160)
-        artist = clean_metadata(getattr(owner, "username", "") or "", 80)
-        audio_file.unlink(missing_ok=True)
+        artist = clean_metadata(_media_value(owner, "username") or "", 80)
+        _persist_instagrapi_settings(client)
+
+        cover_path = None
+        cover_session = None
+        media_payload = _media_mapping(media)
+        try:
+            if media_payload:
+                cover_session = curl_requests.Session(
+                    impersonate="chrome",
+                    headers={
+                        "Referer": "https://www.instagram.com/",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                cover_path = download_public_thumbnail(cover_session, media_payload, directory)
+        except Exception:
+            cover_path = None
+        finally:
+            if cover_session is not None:
+                try:
+                    cover_session.close()
+                except Exception:
+                    pass
+
         args = [
             ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-            "-i", str(source_file), "-vn", "-map", "0:a:0?",
-            "-codec:a", "libmp3lame", "-b:a", f"{quality}k",
-            "-map_metadata", "-1", "-metadata", "title=" + title,
+            "-i", str(source_file),
+        ]
+        if cover_path is not None:
+            args.extend(["-i", str(cover_path)])
+        args.extend([
+            "-map", "0:a:0?",
+            "-codec:a", "libmp3lame",
+            "-b:a", f"{quality}k",
+            "-map_metadata", "-1",
+            "-metadata", "title=" + title,
             "-metadata", "album=Instagram Reels",
             "-metadata", "comment=Converted with ReelTone",
             "-id3v2_version", "3",
-        ]
+        ])
         if artist:
             args.extend(["-metadata", "artist=" + artist])
+        if cover_path is not None:
+            args.extend([
+                "-map", "1:v:0",
+                "-codec:v", "mjpeg",
+                "-disposition:v:0", "attached_pic",
+            ])
+        else:
+            args.append("-vn")
         args.extend(["-f", "mp3", str(audio_file)])
-        encoded = subprocess.run(args, capture_output=True, timeout=35, check=False)
-        if encoded.returncode != 0 or not audio_file.exists() or audio_file.stat().st_size < 128:
+
+        encoded = subprocess.run(
+            args,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if encoded.returncode != 0:
+            audio_file.unlink(missing_ok=True)
+            args_no_cover = [
+                ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+                "-i", str(source_file), "-vn", "-map", "0:a:0?",
+                "-codec:a", "libmp3lame", "-b:a", f"{quality}k",
+                "-map_metadata", "-1",
+                "-metadata", "title=" + title,
+                "-metadata", "album=Instagram Reels",
+                "-metadata", "comment=Converted with ReelTone",
+                "-id3v2_version", "3",
+            ]
+            if artist:
+                args_no_cover.extend(["-metadata", "artist=" + artist])
+            args_no_cover.extend(["-f", "mp3", str(audio_file)])
+            encoded = subprocess.run(
+                args_no_cover,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+
+        if (
+            encoded.returncode != 0
+            or not audio_file.exists()
+            or audio_file.stat().st_size < 128
+        ):
             audio_file.unlink(missing_ok=True)
             return None
 
-        return {"title": title, "uploader": artist, "_extractor": "instagrapi"}
-    except HTTPException:
+        _persist_instagrapi_settings(client)
+        return {
+            "title": title,
+            "uploader": artist,
+            "_extractor": "instagrapi",
+        }
+    except HTTPException as error:
+        details = error.detail if isinstance(error.detail, dict) else {}
+        if details.get("code") == "INSTAGRAPI_RATE_LIMITED":
+            _invalidate_instagrapi_client(
+                client, "rate-limited", INSTAGRAPI_RATE_COOLDOWN_SECONDS
+            )
         raise
     except Exception as error:
-        # Never include exception text: it can contain signed URLs or account details.
-        error_name = type(error).__name__.lower()
-        message = str(error).lower()
-        if (
-            "throttled" in error_name
-            or "ratelimit" in error_name
-            or "rate limit" in message
-            or "too many requests" in message
-            or "http 429" in message
-            or "status code 429" in message
-            or "please wait" in message
-        ):
+        kind = _instagrapi_error_kind(error)
+        if kind == "rate-limited":
+            _invalidate_instagrapi_client(
+                client, "rate-limited", INSTAGRAPI_RATE_COOLDOWN_SECONDS
+            )
             raise HTTPException(
                 status_code=503,
-                headers={"Retry-After": "300"},
-                detail={"code": "INSTAGRAPI_RATE_LIMITED", "error": "Instagram temporarily limited the authenticated media request."},
+                headers={"Retry-After": str(INSTAGRAPI_RATE_COOLDOWN_SECONDS)},
+                detail={
+                    "code": "INSTAGRAPI_RATE_LIMITED",
+                    "error": "Instagram temporarily limited the authenticated media request.",
+                },
             )
+        if kind in {"expired-session", "challenge-required"}:
+            _invalidate_instagrapi_client(client, kind)
+        # Do not expose exception messages; they may contain cookies or signed URLs.
         return None
-    finally:
-        if response is not None:
-            try:
-                response.close()
-            except Exception:
-                pass
-        if client is not None:
-            for session_name in ("private", "public", "graphql"):
-                session = getattr(client, session_name, None)
-                close = getattr(session, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        pass
-        source_file.unlink(missing_ok=True)
 
 
 def try_gallery_dl_public_media(

@@ -99,34 +99,23 @@ ReelTone is distributed under the [Apache License 2.0](LICENSE).
 
 Deploy a Render Docker web service from this repository using `Dockerfile.extractor` (Docker runtime). Set `REELTONE_EXTRACTOR_TOKEN` to a strong random shared secret. The service validates URLs independently, disables the public API docs, caps source duration and size, and returns MP3 bytes directly. Configure the identical value as `IMPERSONATED_YTDLP_API_TOKEN` in Vercel and set `IMPERSONATED_YTDLP_API_URL` to the service root.
 
-**Optional instagrapi media path:** the extractor includes `instagrapi==3.1.0` and tries its authenticated media API before anonymous extraction only when a session is configured.
+**Optional Instagrapi media path:** the Render extractor can use an authorized session for public-video metadata and media URLs before trying its anonymous fallbacks. It reuses one client per worker, keeps rotated settings in a private owner-only temporary file, and never forwards the account's private API cookies to Instagram's media CDN.
 
-To enable it safely:
+An Instagram `sessionid` is a revocable session credential, not a permanent API key. Instagram can expire it, revoke it, or require a security challenge. There is no supported way to make it immortal. ReelTone now cools down an invalid session and falls back to public extractors instead of hammering login endpoints.
 
-1. On a computer you control, create a fresh folder and virtual environment, then install the same client release: `python -m venv .venv` and activate it, followed by `python -m pip install instagrapi==3.1.0`.
-2. Save the following as `make_session.py` and run `python make_session.py`. It prompts for the Instagram password without echoing it and optionally accepts a 2FA code. Only use an account you control and are authorized to use.
+For setup:
 
-   ```python
-   from getpass import getpass
-   from instagrapi import Client
+1. Use only an Instagram account you own or are authorized to use. You can provide a saved session settings file as `INSTAGRAPI_SETTINGS_B64` (preferred) or a browser `INSTAGRAPI_SESSIONID` as a compatibility bootstrap. Settings can be generated locally after a successful `instagrapi` login; never upload the JSON file to GitHub or send its contents in chat.
+2. Add authentication material only in the [Render extractor environment settings](https://dashboard.render.com/web/srv-dbdelsnb9u1s739ej6cg/environment). Never put it in Vercel client-side variables, source code, logs, issue comments, or chat.
+3. For **automatic renewal**, add these Render environment variables using the account owner’s own credentials:
+   - `INSTAGRAPI_AUTO_REAUTH=true`
+   - `INSTAGRAPI_USERNAME` = the account username
+   - `INSTAGRAPI_PASSWORD` = the account password, stored as a Render secret
+   The service reuses saved settings first and permits a bounded `Client.login()` renewal attempt when the saved session is rejected. It does not loop on password login; on a challenge, unsupported client response, or failed renewal, it cools down and keeps the anonymous public-media fallback available. Automatic renewal is best-effort because Instagram may reject password login or require human verification.
+4. After saving environment changes, wait for Render to redeploy and check [extractor health](https://reeltone-impersonated-extractor.onrender.com/health). It exposes only safe flags such as whether a session is configured, the non-secret auth mode, and whether auto-renew is configured. These flags do not prove every media request will succeed.
+5. Test one public Reel. The authenticated API metadata lookup tries bounded video-URL candidates; if a signed CDN URL returns `401/403`, the service refreshes metadata once and retries one new signed URL. The media download is still anonymous at the CDN layer, with host validation and file/duration caps. If the request is rate-limited, the service pauses rather than rotating sessions or repeating login attempts.
 
-   username = input("Instagram username: ").strip()
-   password = getpass("Instagram password: ")
-   code = input("2FA code (press Enter if not needed): ").strip()
-
-   client = Client()
-   client.login(username, password, verification_code=code)
-   client.dump_settings("instagrapi-session.json")
-   print("Saved instagrapi-session.json. Keep it private.")
-   ```
-
-3. Encode the settings locally, without uploading the file to GitHub or sending it in chat:
-   `python -c "import base64; print(base64.b64encode(open('instagrapi-session.json','rb').read()).decode())"`
-4. Open [the Render extractor environment settings](https://dashboard.render.com/web/srv-dbdelsnb9u1s739ej6cg/environment). Add the secret variable `INSTAGRAPI_SETTINGS_B64` with the Base64 output as its value. Save changes and let Render redeploy. Do not add this value to Vercel, browser code, logs, public issue comments, or Git.
-5. Verify [extractor health](https://reeltone-impersonated-extractor.onrender.com/health). It should show `instagrapiInstalled: true` and `instagrapiSessionConfigured: true`; the health endpoint exposes only booleans, never secrets. Then test one public Reel in ReelTone.
-6. If Instagram presents a challenge, login fails, or the account receives a warning, stop instead of repeatedly retrying. Resolve the challenge through Instagram's official app/site and export settings again only if needed. A session can expire or be revoked.
-
-The session must belong to an account the operator is authorized to use. The converter rejects private-account media, imposes duration and file-size limits, and makes the signed-media CDN download through a separate unauthenticated session so the account's private API cookies are not forwarded to the CDN. If no session is configured, anonymous extractors remain available.
+Private-account media is rejected. If Instagram presents a challenge, asks for a password reset, or reports that the client is unsupported, resolve that through the official Instagram app/site and do not retry repeatedly. The extractor is unofficial and depends on Instagram behavior, so session renewal and successful media availability cannot be guaranteed.
 
 ## Reliability and caching
 
