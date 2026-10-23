@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hmac
+import importlib.util
 import json
 import subprocess
 import os
@@ -441,12 +442,15 @@ def try_graphql_public_media(
 
 @app.get("/health")
 def health():
+    # Publish only configuration booleans, never session values or cookie data.
     return {
         "ok": True,
         "service": "reeltone-impersonated-extractor",
         "engine": "yt-dlp",
         "browserImpersonation": True,
         "ffmpegAvailable": shutil.which("ffmpeg") is not None,
+        "instagrapiInstalled": importlib.util.find_spec("instagrapi") is not None,
+        "instagrapiSessionConfigured": instagrapi_is_configured(),
     }
 
 
@@ -665,7 +669,14 @@ def try_instagrapi_public_media(
         if not media_url:
             return None
 
-        response = client.private.get(media_url, stream=True, timeout=(10, 22))
+        # Fetch the signed CDN URL with an anonymous transport session. Never send
+        # the authenticated private-API session's cookies/headers to the media CDN.
+        response = curl_requests.get(
+            media_url,
+            impersonate="chrome",
+            stream=True,
+            timeout=22,
+        )
         if response.status_code == 429:
             raise HTTPException(
                 status_code=503,
