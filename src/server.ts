@@ -32,9 +32,8 @@ const ffmpegPath: string | null = require("ffmpeg-static") as string | null;
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const MAX_DURATION_SECONDS = 20 * 60;
-const MAX_REQUESTS_PER_HOUR = 8;
+const MAX_REQUESTS_PER_HOUR = 20;
 const PROCESS_TIMEOUT_MS = 45 * 1000;
-const QUALITY_PRESETS = new Set(["128", "192", "256", "320"]);
 const ALLOWED_HOSTS = new Set([
   "instagram.com",
   "www.instagram.com",
@@ -276,9 +275,9 @@ function makeIpHash(ip: string): string {
 }
 
 
-const DEFAULT_SOURCE_COOLDOWN_SECONDS = 300;
+const DEFAULT_SOURCE_COOLDOWN_SECONDS = 60;
 const MAX_SOURCE_COOLDOWN_SECONDS = 3600;
-type SourceCooldownKey = "instagram" | "resolver" | "easydown" | "gallery-dl" | "instagrapi";
+type SourceCooldownKey = "instagram" | "resolver" | "easydown" | "gallery-dl" | "instagrapi" | "cobalt-primary" | "cobalt-secondary" | "apify";
 const localSourceCooldowns = new Map<SourceCooldownKey, { until: number; strikeCount: number }>();
 
 function parseRetryAfterSeconds(value: string | null | undefined): number | undefined {
@@ -299,8 +298,20 @@ async function getSourceCooldownSeconds(source: SourceCooldownKey): Promise<numb
     const current = localSourceCooldowns.get(source);
     return current ? Math.max(0, Math.ceil((current.until - Date.now()) / 1000)) : 0;
   }
+  // Older versions exponentially extended a source cooldown for up to an hour.
+  // Clamp those legacy rows (strike_count > 1) to at most one minute from their
+  // last update. New rows always store strike_count=1, preserving explicit
+  // Retry-After values without the old escalation behavior.
   const rows = await (sql`
-    SELECT GREATEST(0, CEIL(EXTRACT(EPOCH FROM (cooldown_until - now()))))::int AS remaining_seconds
+    SELECT GREATEST(
+      0,
+      CEIL(EXTRACT(EPOCH FROM (
+        CASE WHEN strike_count > 1
+          THEN LEAST(cooldown_until, updated_at + interval '60 seconds')
+          ELSE cooldown_until
+        END - now()
+      )))
+    )::int AS remaining_seconds
     FROM reeltone_source_cooldowns
     WHERE cooldown_key = ${source} AND cooldown_until > now()
     LIMIT 1
@@ -309,35 +320,25 @@ async function getSourceCooldownSeconds(source: SourceCooldownKey): Promise<numb
 }
 
 async function registerSourceCooldown(source: SourceCooldownKey, retryAfterSeconds?: number): Promise<number> {
-  const requested = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, Math.max(1, Math.ceil(retryAfterSeconds || DEFAULT_SOURCE_COOLDOWN_SECONDS)));
+  // Use the upstream Retry-After when present, otherwise a short 60-second
+  // cooldown. Do not exponentially escalate: independent providers are tried
+  // separately and each source gets its own cooldown key.
+  const duration = Math.min(
+    MAX_SOURCE_COOLDOWN_SECONDS,
+    Math.max(1, Math.ceil(retryAfterSeconds ?? DEFAULT_SOURCE_COOLDOWN_SECONDS))
+  );
   const sql = getSql();
   if (!sql) {
-    const previous = localSourceCooldowns.get(source);
-    const isActive = !!previous && previous.until > Date.now();
-    const strikeCount = previous ? (isActive ? previous.strikeCount : Math.min(8, previous.strikeCount + 1)) : 1;
-    const backoff = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, DEFAULT_SOURCE_COOLDOWN_SECONDS * (2 ** (strikeCount - 1)));
-    const duration = Math.max(requested, backoff);
-    localSourceCooldowns.set(source, { until: Math.max(previous?.until || 0, Date.now() + duration * 1000), strikeCount });
-    return Math.max(1, Math.ceil((localSourceCooldowns.get(source)!.until - Date.now()) / 1000));
+    const until = Date.now() + duration * 1000;
+    localSourceCooldowns.set(source, { until, strikeCount: 1 });
+    return duration;
   }
-
-  const existing = await (sql`
-    SELECT strike_count, (cooldown_until > now()) AS active
-    FROM reeltone_source_cooldowns
-    WHERE cooldown_key = ${source}
-    LIMIT 1
-  ` as unknown as Promise<Array<{ strike_count: number; active: boolean }>>);
-  const oldStrikeCount = Number(existing[0]?.strike_count || 0);
-  const stillActive = existing[0]?.active === true;
-  const strikeCount = oldStrikeCount === 0 ? 1 : (stillActive ? oldStrikeCount : Math.min(8, oldStrikeCount + 1));
-  const backoff = Math.min(MAX_SOURCE_COOLDOWN_SECONDS, DEFAULT_SOURCE_COOLDOWN_SECONDS * (2 ** (strikeCount - 1)));
-  const duration = Math.max(requested, backoff);
   await sql`
     INSERT INTO reeltone_source_cooldowns (cooldown_key, cooldown_until, strike_count, updated_at)
-    VALUES (${source}, now() + (${duration} * interval '1 second'), ${strikeCount}, now())
+    VALUES (${source}, now() + (${duration} * interval '1 second'), 1, now())
     ON CONFLICT (cooldown_key) DO UPDATE SET
-      cooldown_until = GREATEST(reeltone_source_cooldowns.cooldown_until, EXCLUDED.cooldown_until),
-      strike_count = GREATEST(reeltone_source_cooldowns.strike_count, EXCLUDED.strike_count),
+      cooldown_until = EXCLUDED.cooldown_until,
+      strike_count = 1,
       updated_at = now()
   `;
   return await getSourceCooldownSeconds(source) || duration;
@@ -1932,12 +1933,9 @@ app.post("/api/convert", async (req: Request, res: Response) => {
   const validated = validateInstagramUrl(req.body?.url);
   if (validated.ok === false) return sendApiError(res, 400, { code: "INVALID_URL", title: "Check your Instagram link", error: validated.reason, retryable: false, category: "input" });
 
-  const requestedQuality = String(req.body?.quality || "192");
-  if (!QUALITY_PRESETS.has(requestedQuality)) {
-    return sendApiError(res, 400, { code: "INVALID_QUALITY", title: "Choose an audio quality", error: "Select 128, 192, 256, or 320 kbps, then start the conversion again.", retryable: false, category: "input" });
-  }
-
-  const quality = requestedQuality as QualityPreset;
+  // ReelTone now uses a single fixed output bitrate for predictable results.
+  // Ignore legacy client values so API callers cannot reintroduce the picker.
+  const quality: QualityPreset = "192";
 
   // Count requests per visitor first; then let cached audio bypass Instagram's
   // global cooldown. Re-downloading an already converted Reel should not touch
