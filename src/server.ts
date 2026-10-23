@@ -1365,6 +1365,9 @@ async function tryImpersonatedYtDlpToMp3(
   const token = process.env.IMPERSONATED_YTDLP_API_TOKEN?.trim();
   if (!token) return { ok: false, reason: "impersonated-not-configured" };
 
+  // A prior provider can leave a partial file behind on an interrupted transcode.
+  fs.rmSync(outputPath, { force: true });
+
   try {
     const response = await fetch(endpoint, {
       method: "POST",
