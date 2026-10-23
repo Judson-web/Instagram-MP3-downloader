@@ -526,3 +526,38 @@ input, textarea, [contenteditable="true"], [contenteditable=""] { -webkit-user-s
 @media (max-width: 560px) {
   .quality-options { width: min(204px, calc(100vw - 48px)); max-height: min(202px, 36vh); }
 }
+
+/* Keep conversion errors readable on narrow phones and in compact cards. */
+.error-panel {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+.error-icon { margin-top: 1px; }
+.error-copy { min-width: 0; overflow-wrap: anywhere; }
+.error-copy strong,
+.error-copy p { min-width: 0; overflow-wrap: anywhere; }
+#retry-button {
+  align-self: start;
+  justify-self: end;
+  margin: 0;
+  white-space: nowrap;
+  max-width: 100%;
+}
+@media (max-width: 560px) {
+  .error-panel {
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 10px;
+    padding: 14px;
+  }
+  .error-copy strong { font-size: 13px; line-height: 1.4; }
+  .error-copy p { font-size: 12px; line-height: 1.55; }
+  #retry-button {
+    grid-column: 2;
+    justify-self: start;
+    margin: 2px 0 0;
+  }
+}
