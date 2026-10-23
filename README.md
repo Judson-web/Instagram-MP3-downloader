@@ -97,7 +97,9 @@ ReelTone is distributed under the [Apache License 2.0](LICENSE).
 
 ## Impersonated extractor service
 
-Deploy a Render Docker web service from this repository using `Dockerfile.extractor` (Docker runtime). Set `REELTONE_EXTRACTOR_TOKEN` to a strong random shared secret. The service validates URLs independently, disables the public API docs, caps source duration and size, and returns MP3 bytes directly. Configure the identical value as `IMPERSONATED_YTDLP_API_TOKEN` in Vercel and set `IMPERSONATED_YTDLP_API_URL` to the service root. No Instagram account cookies are collected or forwarded.
+Deploy a Render Docker web service from this repository using `Dockerfile.extractor` (Docker runtime). Set `REELTONE_EXTRACTOR_TOKEN` to a strong random shared secret. The service validates URLs independently, disables the public API docs, caps source duration and size, and returns MP3 bytes directly. Configure the identical value as `IMPERSONATED_YTDLP_API_TOKEN` in Vercel and set `IMPERSONATED_YTDLP_API_URL` to the service root.
+
+**Optional instagrapi media path:** the extractor includes `instagrapi==3.1.0` and tries its authenticated media API before anonymous extraction only when a session is configured. Set one Render *secret* environment variable: `INSTAGRAPI_SETTINGS_JSON` (serialized settings from an instagrapi `Client.get_settings()` session), `INSTAGRAPI_SETTINGS_B64` (base64-encoded settings JSON), or `INSTAGRAPI_SESSIONID` (a session ID accepted by the private API). The session must belong to an account the operator is authorized to use. Never put session values in browser code, Git, logs, or ChatGPT. Prefer reusable instagrapi settings over a raw session ID; session cookies can expire or be revoked. This path rejects private-account media and gets its own cooldown after a rate limit. If no session is configured, anonymous extractors remain available.
 
 
 ## Reliability and caching
