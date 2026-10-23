@@ -143,6 +143,10 @@ function classifyConversionFailure(evidence: string, timedOut = false): { status
   if (/reel-unavailable|not found|does not exist|removed|deleted|no longer available|expired media/.test(message)) {
     return { status: 404, payload: { code: "REEL_UNAVAILABLE", title: "This Reel could not be found", error: "The post may have been removed, the link may be mistyped, or Instagram may have stopped serving the media.", retryable: false, category: "availability" } };
   }
+
+  if (/impersonated-(?:extractor-unavailable|timeout)|impersonated-http-(?:401|403|5\d\d)/.test(message)) {
+    return { status: 503, payload: { code: "RESOLVER_UNAVAILABLE", title: "The independent extractor is temporarily unavailable", error: "The backup extractor could not retrieve media from Instagram. ReelTone tried its configured fallbacks; retry later or try a different public Reel.", retryable: true, category: "service" } };
+  }
   if (/no-public-media|no-public-video-metadata|no media in embed payload|resolver-no-media|resolver-no-video|media-not-public|instagram-page-unavailable|extract_failed/.test(message)) {
     return { status: 422, payload: { code: "NO_PUBLIC_MEDIA", title: "No publicly playable video was found", error: "Instagram did not expose a playable video to the converter. The Reel may be private, login-gated, age/region-restricted, removed, or temporarily unavailable. Instagram's response doesn't let us distinguish those cases reliably.", retryable: false, category: "availability" } };
   }
@@ -1393,6 +1397,17 @@ async function tryImpersonatedYtDlpToMp3(
       } catch { /* Use only the HTTP status when a provider error is not JSON. */ }
 
       const code = String(payload?.code || payload?.detail?.code || "").toUpperCase();
+      if (code === "NO_PUBLIC_MEDIA") {
+        return { ok: false, reason: "no-public-media", diagnostic: "impersonated-no-public-media" };
+      }
+      if (code === "SOURCE_RATE_LIMITED" || response.status === 429) {
+        return {
+          ok: false,
+          reason: "impersonated-rate-limited",
+          retryAfterSeconds,
+          diagnostic: "impersonated-source-rate-limited"
+        };
+      }
       if (code === "VIDEO_TOO_LONG") {
         return { ok: false, reason: "duration-limit", diagnostic: "impersonated-http-413" };
       }
@@ -1658,6 +1673,11 @@ app.post("/api/convert", async (req: Request, res: Response) => {
       );
       recordStage("yt-dlp-impersonated", impersonatedFallback.reason);
 
+      if (impersonatedFallback.reason === "impersonated-rate-limited") {
+        const seconds = await registerSourceCooldown("instagram", impersonatedFallback.retryAfterSeconds);
+        cleanup();
+        return sourceCooldownError(res, "instagram", seconds);
+      }
       if (clientDisconnected || res.destroyed || fallbackController.signal.aborted) {
         cleanup();
         return;
@@ -1681,10 +1701,10 @@ app.post("/api/convert", async (req: Request, res: Response) => {
         const failure = classifyConversionFailure(impersonatedFallback.reason);
         return sendApiError(res, failure.status, failure.payload);
       }
-      if (!["impersonated-extractor-unavailable", "impersonated-not-configured"].includes(impersonatedFallback.reason)) {
+      if (impersonatedFallback.reason !== "impersonated-not-configured") {
         console.warn(
           "ReelTone impersonated extractor fallback failed:",
-          impersonatedFallback.reason,
+          String(impersonatedFallback.reason || "unknown").replace(/[^a-z0-9_-]/gi, "").slice(0, 64),
           String(impersonatedFallback.diagnostic || "").replace(/[^a-z0-9._:-]/gi, "").slice(0, 64)
         );
       }
