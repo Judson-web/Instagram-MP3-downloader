@@ -728,8 +728,17 @@ def _build_instagrapi_client(require_renewal: bool = False):
         client.load_settings(str(INSTAGRAPI_SETTINGS_PATH))
         mode = "cached-settings"
     elif sessionid:
-        client.login_by_sessionid(sessionid)
-        mode = "sessionid"
+        try:
+            client.login_by_sessionid(sessionid)
+            mode = "sessionid"
+        except Exception as session_error:
+            # If the imported browser session has expired, one password login is
+            # allowed only when the operator explicitly enabled auto reauth.
+            if not has_credentials or _instagrapi_error_kind(session_error) in {"rate-limited", "challenge-required"}:
+                raise
+            if not client.login(username, password):
+                raise RuntimeError("Instagrapi credential login was not accepted")
+            mode = "password"
     elif has_credentials:
         if not client.login(username, password):
             raise RuntimeError("Instagrapi credential login was not accepted")
