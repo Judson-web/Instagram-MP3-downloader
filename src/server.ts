@@ -278,7 +278,7 @@ function makeIpHash(ip: string): string {
 
 const DEFAULT_SOURCE_COOLDOWN_SECONDS = 300;
 const MAX_SOURCE_COOLDOWN_SECONDS = 3600;
-type SourceCooldownKey = "instagram" | "resolver" | "easydown";
+type SourceCooldownKey = "instagram" | "resolver" | "easydown" | "gallery-dl";
 const localSourceCooldowns = new Map<SourceCooldownKey, { until: number; strikeCount: number }>();
 
 function parseRetryAfterSeconds(value: string | null | undefined): number | undefined {
